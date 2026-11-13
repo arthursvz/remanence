@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0e1116" />
+  <meta name="color-scheme" content="dark" />
+  <meta name="referrer" content="no-referrer" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+  <title>Rémanence</title>
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icon.svg" type="image/svg+xml" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <svg class="svg-defs" width="0" height="0" aria-hidden="true">
+    <symbol id="rem-mark" viewBox="0 0 120 120"><g fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 68H34" opacity=".25" /><path d="M34 68l8-12 8 30" opacity=".55" /><path d="M50 86l12-58 10 40h18" /></g><circle cx="102" cy="68" r="12" fill="#f5a524" /></symbol>
+  </svg>
+  <header class="bar">
+    <svg class="bar-mark" aria-hidden="true"><use href="#rem-mark" /></svg>
+    <span class="bar-word">RÉMANENCE</span>
+    <span class="bar-sub" id="bar-sub">référentiel PSE</span>
+    <div class="cursus" id="cursus" role="group" aria-label="Cursus" hidden>
+      <button type="button" data-cursus="PSE1">PSE1</button>
+      <button type="button" data-cursus="PSE2">PSE2</button>
+    </div>
+  </header>
+  <main id="root" class="root"></main>
+  <nav class="tabs" id="tabs" aria-label="Rémanence" hidden>
+    <button type="button" data-tab="review"><svg class="tab-ic" viewBox="0 0 24 24"><path d="M1.6 13.6h5.2" opacity=".35" /><path d="M6.8 13.6l1.6-2.4 1.6 6" opacity=".65" /><path d="M10 17.2l2.4-11.6 2 8H18" /><circle cx="20.4" cy="13.6" r="2.3" fill="currentColor" stroke="none" /></svg>Réviser</button>
+    <button type="button" data-tab="account"><svg class="tab-ic" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4" /><path d="M11 12l9-9M16 7l3 3M14 9l2 2" /></svg>Ma licence<span class="tab-dot" id="tab-dot" hidden></span></button>
+  </nav>
+  <div id="toasts" aria-live="polite"></div>
+  <input type="file" id="file-progress" accept=".remprog,application/octet-stream" hidden />
+  <input type="file" id="file-pack" accept=".bin,application/octet-stream" hidden />
+  <script src="config.js"></script>
+  <script src="remanence.js"></script>
+  <script src="remcrypto.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
