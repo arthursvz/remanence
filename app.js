@@ -6,7 +6,8 @@
  *   paquet    pack.bin chiffré (PDF, fiches, cartes), gardé chiffré dans IndexedDB ; mis à jour d'après pack.json
  *   progression  propre à chaque personne et à cet appareil : journal des réponses { c, at, g, r } → état FSRS rejoué.
  *             Propriétaire : rejoué par-dessus le planning de Dawn contenu dans le paquet.
- *   « Exporter ma progression » / « Importer ma progression » : fichier .remprog chiffré (sauvegarde, retour vers Dawn).
+ *   « Exporter ma progression » / « Importer ma progression » : fichier .remprog.pdf chiffré (sauvegarde, retour vers Dawn) ;
+ *   extension .pdf pour que le partage et les sélecteurs Android l'acceptent : ce n'est pas un vrai PDF.
  * Logique de révision : shared/remanence.js (DawnRemanence), la même que sur le bureau.
  */
 
@@ -313,14 +314,16 @@ function stats() {
 // ───────────────────────── écrans ─────────────────────────
 
 function show(screen) {
+  const changed = S.screen !== screen;
   S.screen = screen;
   render();
+  if (changed && screen !== 'session') window.scrollTo(0, 0);
 }
 
 function render() {
   const root = $('#root');
   const cur = $('#cursus');
-  cur.hidden = !(S.data && (S.screen === 'home' || S.screen === 'session'));
+  cur.hidden = !(S.data && ['home', 'session', 'free'].includes(S.screen));
   for (const b of cur.querySelectorAll('button')) b.setAttribute('aria-pressed', String(S.prog && b.dataset.cursus === cfg().cursus));
   $('#bar-sub').textContent = S.lic ? S.lic.h : 'référentiel PSE';
   const tabs = !!(S.data && S.screen === 'home');
@@ -328,10 +331,9 @@ function render() {
   document.body.classList.toggle('has-tabs', tabs);
   for (const b of document.querySelectorAll('#tabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === S.tab));
   $('#tab-dot').hidden = !(tabs && needsBackup());
-  const view = S.screen === 'licence' ? licenceView() : S.screen === 'busy' ? busyView() : S.screen === 'session' && S.session ? sessionView()
+  const view = S.screen === 'licence' ? licenceView() : S.screen === 'busy' ? busyView() : S.screen === 'session' && S.session ? sessionView() : S.screen === 'free' && S.data ? freeView()
     : S.screen === 'home' && S.data ? (S.tab === 'account' ? accountView() : homeView()) : S.screen === 'boot' ? h('p', { class: 'muted' }, 'Ouverture…') : licenceView();
   root.replaceChildren(view);
-  if (S.screen !== 'session') window.scrollTo(0, 0);
   if (S.screen === 'home' && !INST.offered) {
     INST.offered = true;
     setTimeout(() => maybeOfferInstall(), 1200); // une fois par ouverture, après l'arrivée sur l'accueil
@@ -398,6 +400,42 @@ function forecast(cards) {
   return h('div', { class: 'forecast', title: 'Cartes à revoir sur 30 jours' }, ...days.map((n) => h('span', { class: 'fc', style: `height:${Math.round((n / max) * 100)}%` })));
 }
 
+// ── séance libre : mêmes filtres que sur l'ordinateur (chapitres, nature, gestes vitaux), choix gardé ──
+
+const NATURE = { AC: 'Connaissances', PR: 'Procédure', FT: 'Technique' };
+const freeScope = () => ({ chapters: [], natures: [], vital: false, ...((S.prog.cfg || {}).scope || {}) });
+function inFreeScope(c) {
+  const sc = freeScope();
+  const f = fiche(c.ficheId);
+  if (!f) return !sc.chapters.length && !sc.natures.length && !sc.vital;
+  return (!sc.chapters.length || sc.chapters.includes(f.chapter)) && (!sc.natures.length || sc.natures.includes(f.nature)) && (!sc.vital || f.critical);
+}
+
+function freeView() {
+  const sc = freeScope();
+  const set = (patch) => setCfg({ scope: { ...sc, ...patch } });
+  const toggle = (list, v) => (list.includes(v) ? list.filter((x) => x !== v) : [...list, v]);
+  const chip = (on, label, fn) => h('button', { class: `chip${on ? ' on' : ''}`, onclick: fn }, label);
+  const chapters = [...new Map(S.data.fiches.filter(inCursus).map((f) => [f.chapter, f.chapterName || `Chapitre ${f.chapter}`])).entries()]
+    .filter(([c]) => c).sort((a, b) => String(a[0]).localeCompare(String(b[0]), 'fr', { numeric: true }));
+  const n = active().filter(inFreeScope).length;
+  return h('div', { class: 'stack' },
+    h('div', { class: 'card' },
+      h('div', { class: 'card-head' }, h('h3', {}, 'Séance libre'), h('span', { class: 'mono small muted' }, plural(n, 'carte'))),
+      h('div', { class: 'card-body stack' },
+        h('p', { class: 'muted small' }, 'Toutes les cartes choisies, même pas dues, dans le désordre. Le planning ne change pas.'),
+        h('span', { class: 'eyebrow' }, 'Chapitres'),
+        h('div', { class: 'chips', id: 'free-chapters' },
+          chip(!sc.chapters.length, 'Tous', () => set({ chapters: [] })),
+          ...chapters.map(([c, name]) => chip(sc.chapters.includes(c), `${c} · ${name}`, () => set({ chapters: toggle(sc.chapters, c) })))),
+        h('span', { class: 'eyebrow' }, 'Nature'),
+        h('div', { class: 'chips', id: 'free-natures' },
+          ...Object.entries(NATURE).map(([k, label]) => chip(sc.natures.includes(k), label, () => set({ natures: toggle(sc.natures, k) }))),
+          chip(sc.vital, '✱ Gestes vitaux seulement', () => set({ vital: !sc.vital }))))),
+    h('button', { class: 'primary wide', id: 'free-go', style: 'padding:15px;font-size:16px', disabled: !n, onclick: () => startSession({ free: true }) }, n ? `Commencer (${n})` : 'Aucune carte dans ces filtres'),
+    h('button', { class: 'secondary wide', onclick: () => show('home') }, 'Retour'));
+}
+
 function homeView() {
   const st = stats();
   const c = cfg();
@@ -417,7 +455,7 @@ function homeView() {
     stat('Échéance', st.left == null ? '—' : st.left >= 0 ? `J-${st.left}` : 'passée', st.left != null && st.fresh.length ? `${st.perDay} nouvelles / jour` : 'à régler plus bas')));
   wrap.append(h('div', { class: 'start' },
     h('button', { class: 'primary', id: 'start', disabled: !total, onclick: () => startSession() }, total ? `Commencer la séance (${total})` : 'Rien à revoir aujourd’hui'),
-    h('button', { class: 'secondary', id: 'free', disabled: !st.cards.length, onclick: () => startSession({ free: true }) }, `Séance libre (${st.cards.length}) · sans effet sur le planning`)));
+    h('button', { class: 'secondary', id: 'free', disabled: !st.cards.length, onclick: () => show('free') }, `Séance libre (${st.cards.length}) · sans effet sur le planning`)));
   wrap.append(h('div', { class: 'card' }, h('div', { class: 'card-body stack' }, h('span', { class: 'eyebrow' }, 'Prévision · 30 jours'), forecast(st.cards))));
 
   const exam = h('input', { type: 'date', value: c.exam });
@@ -516,8 +554,8 @@ function licenceCard() {
 async function progressFile() {
   const header = { channel: S.lic.ch, licence: S.lic.id, holder: S.lic.h, owner: !!S.lic.o, exportedAt: new Date().toISOString(), reviews: S.prog.log.length };
   const bin = await X.sealProgress(S.keys.k, header, { log: S.prog.log, seen: S.prog.seen, days: S.prog.days, cfg: S.prog.cfg, ...(S.lic.o ? { base: S.prog.base || {} } : {}) });
-  const name = `remanence-${norm(S.lic.h).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'progression'}-${dayOf()}.remprog`;
-  return new File([bin], name, { type: 'application/octet-stream' });
+  const name = `remanence-${norm(S.lic.h).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'progression'}-${dayOf()}.remprog.pdf`;
+  return new File([bin], name, { type: 'application/pdf' });
 }
 
 async function markBackup(how) {
@@ -728,7 +766,7 @@ function startSession(opts = {}) {
   const vital = (a, b) => Number(critical(b)) - Number(critical(a));
   const byRef = (a, b) => { const fa = fiche(a.ficheId); const fb = fiche(b.ficheId); return (fa ? fa.order : 1e9) - (fb ? fb.order : 1e9) || String(a.createdAt).localeCompare(String(b.createdAt)); };
   let queue;
-  if (opts.free) queue = active().sort(() => Math.random() - 0.5);
+  if (opts.free) queue = active().filter(inFreeScope).sort(() => Math.random() - 0.5);
   else {
     const st = stats();
     const due = st.due.slice().sort((a, b) => vital(a, b) || Date.parse(srsOf(a).due) - Date.parse(srsOf(b).due));

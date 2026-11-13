@@ -211,3 +211,8 @@ body.has-tabs #toasts { bottom: calc(86px + env(safe-area-inset-bottom)); }
   .stats { grid-template-columns: repeat(4, 1fr); }
   .plan { grid-template-columns: repeat(4, 1fr); }
 }
+
+/* filtres de la séance libre (comme .rm-chip sur l'ordinateur) */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { background: none; border: 1px solid var(--line-strong); color: var(--text); border-radius: 99px; padding: 8px 14px; font-size: 14px; text-align: left; }
+.chip.on { border-color: var(--amber); color: var(--amber); background: var(--amber-soft); }

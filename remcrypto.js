@@ -55,9 +55,34 @@
   /** Clé AES non extractable : elle peut être rangée telle quelle dans IndexedDB sans que ses octets soient lisibles. */
   const aesKey = (b64u) => subtle.importKey('raw', fromB64u(b64u), { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
 
+  /** Fichier passé en texte base64 par une messagerie ou un mail : on retrouve les octets d'origine. */
+  function unwrap(u8, magic) {
+    if (u8.length >= 9 && dec.decode(u8.subarray(0, 4)) === magic) return u8;
+    const txt = dec.decode(u8.subarray(0, Math.min(u8.length, 64))).trim();
+    const b64 = btoa(magic).replace(/=+$/, '').slice(0, 5); // « Uk1QR » pour RMPG
+    if (txt.startsWith(b64)) {
+      try { return fromB64(dec.decode(u8).replace(/\s+/g, '')); } catch { /* pas du base64 */ }
+    }
+    return u8;
+  }
+
+  /** Pourquoi un fichier n'est pas celui attendu : taille, début, cause probable. */
+  function explain(u8, magic) {
+    const start = dec.decode(u8.subarray(0, 12)).replace(/[^\x20-\x7e]/g, '·');
+    const lead = dec.decode(u8.subarray(0, 4));
+    const what = magic === 'RMPG' ? 'une progression Rémanence' : 'un paquet Rémanence';
+    let why = '';
+    if (!u8.length) why = 'le fichier est vide : le transfert n’a pas abouti.';
+    else if (/^\s*</.test(start)) why = 'c’est une page web : le lien de partage a été enregistré à la place du fichier. Télécharge le fichier lui-même.';
+    else if (lead.startsWith('PK')) why = 'c’est une archive zip : ouvre-la et choisis le fichier .remprog qu’elle contient.';
+    else if (lead === 'RMPK') why = 'c’est le paquet du site (pack.bin), pas une progression.';
+    else if (lead === 'RMPG' && u8[4] !== 1) why = 'progression d’une version plus récente : mets à jour la page (ferme et rouvre l’appli).';
+    return `Ce fichier n’est pas ${what} (${u8.length.toLocaleString('fr-FR')} octets, commence par « ${start} »)${why ? ` : ${why}` : '.'}`;
+  }
+
   function head(magic, buf) {
-    const u8 = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
-    if (u8.length < 9 || dec.decode(u8.subarray(0, 4)) !== magic || u8[4] !== 1) throw new RemError('BAD_FILE', magic === 'RMPG' ? 'Ce fichier n’est pas une progression Rémanence.' : 'Paquet Rémanence illisible.');
+    const u8 = unwrap(buf instanceof Uint8Array ? buf : new Uint8Array(buf), magic);
+    if (u8.length < 9 || dec.decode(u8.subarray(0, 4)) !== magic || u8[4] !== 1) throw new RemError('BAD_FILE', explain(u8, magic));
     const n = new DataView(u8.buffer, u8.byteOffset + 5, 4).getUint32(0, true);
     const h = u8.subarray(9, 9 + n);
     return { u8, h, header: JSON.parse(dec.decode(h)), ct: u8.subarray(9 + n) };
