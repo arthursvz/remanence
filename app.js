@@ -76,7 +76,9 @@ const get = (k) => idb('readonly', (s) => s.get(k));
 const put = (k, v) => idb('readwrite', (s) => s.put(v, k));
 const del = (k) => idb('readwrite', (s) => s.delete(k));
 
-const progKey = () => `progress:${S.lic.h}`;
+// progression rangée par personne (p : gardé quand la licence est prolongée) ; licences sans p : par nom
+const progKey = () => `progress:${S.lic.p ? `p:${S.lic.p}` : S.lic.h}`;
+const samePerson = (a, b) => (a.p && b.p ? a.p === b.p : a.h === b.h);
 const blankProg = () => ({ log: [], seen: {}, days: {}, cfg: {}, lastBackup: 0, lastSeen: 0 });
 
 /** Enregistre la progression ; une écriture refusée est signalée, jamais ignorée. */
@@ -109,8 +111,8 @@ async function boot() {
     if (!window.isSecureContext || !crypto.subtle) throw new Error('Cette page doit être ouverte en https.');
     const fromLink = /#lic=/.test(location.hash) ? location.hash.slice(1).replace(/^lic=/, '') : null;
     if (fromLink) history.replaceState(null, '', location.pathname + location.search); // la licence ne reste pas dans l'adresse
-    if (fromLink) await installLicence(fromLink, { quiet: true });
-    else await loadLicence();
+    await loadLicence(); // la licence en place : une nouvelle au même titulaire est une prolongation
+    if (fromLink) await installLicence(fromLink);
     if (!S.lic) return show('licence');
     if (!(await checkLicence())) return;
     await loadPack();
@@ -130,26 +132,37 @@ async function loadLicence() {
 }
 
 /** Vérifie, puis range la licence : les clés deviennent des CryptoKey non extractables. */
-async function installLicence(token, { quiet = false } = {}) {
+async function installLicence(token) {
   const lic = await X.parseLicence(token, CFG.pub);
   if (Date.now() > lic.exp) throw new Error(`Cette licence a expiré le ${fmtDate(lic.exp)}.`);
   const keys = { k: await X.aesKey(lic.k), ok: lic.ok ? await X.aesKey(lic.ok) : null };
   const { k, ok, token: _t, ...pub } = lic;
   const prev = S.lic;
-  if (prev && prev.h !== pub.h && !confirm(`Cette licence est au nom de « ${pub.h} » (l’actuelle : « ${prev.h} »). Chaque nom garde sa propre progression sur cet appareil. Continuer ?`)) return false;
+  const same = prev && samePerson(prev, pub);
+  if (prev && !same && !confirm(`Cette licence est au nom de « ${pub.h} » (l’actuelle : « ${prev.h} »). Chaque personne garde sa propre progression sur cet appareil. Continuer ?`)) return false;
   await put('licence', { lic: pub, k: keys.k, ok: keys.ok });
   S.lic = pub;
   S.keys = keys;
   S.prog = null;
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
-  if (!quiet) toast(`Licence de ${pub.h} installée, valable jusqu’au ${fmtDate(pub.exp)}.`);
+  toast(same && pub.exp > prev.exp ? `Licence prolongée jusqu’au ${fmtDate(pub.exp)} : ta progression est gardée.` : `Licence de ${pub.h} installée, valable jusqu’au ${fmtDate(pub.exp)}.`);
   return true;
 }
 
 /** Péremption et horloge : à l'expiration, les clés sont effacées (la progression est gardée). */
 async function checkLicence() {
   const now = Date.now();
-  S.prog = (await get(progKey())) || blankProg();
+  S.prog = await get(progKey());
+  if (!S.prog && S.lic.p) {
+    // progression d'une licence d'avant les identifiants de personne, rangée par nom : reprise une fois
+    const old = await get(`progress:${S.lic.h}`);
+    if (old) {
+      await put(progKey(), old);
+      await del(`progress:${S.lic.h}`);
+    }
+    S.prog = old || null;
+  }
+  S.prog = S.prog || blankProg();
   if (S.prog.lastSeen && now < S.prog.lastSeen - 1.5 * DAY) {
     S.error = 'L’horloge du téléphone a reculé : remets-la à l’heure pour continuer.';
     show('licence');
@@ -314,6 +327,10 @@ function render() {
     : S.screen === 'home' && S.data ? (S.tab === 'account' ? accountView() : homeView()) : S.screen === 'boot' ? h('p', { class: 'muted' }, 'Ouverture…') : licenceView();
   root.replaceChildren(view);
   if (S.screen !== 'session') window.scrollTo(0, 0);
+  if (S.screen === 'home' && !INST.offered) {
+    INST.offered = true;
+    setTimeout(() => maybeOfferInstall(), 1200); // une fois par ouverture, après l'arrivée sur l'accueil
+  }
 }
 
 for (const b of document.querySelectorAll('#cursus button')) b.addEventListener('click', () => setCfg({ cursus: b.dataset.cursus }));
@@ -420,7 +437,7 @@ function homeView() {
 
 /** Page « Ma licence » : compte à rebours jusqu'à la fin de la licence, progression (exporter / importer), paquet. */
 function accountView() {
-  return h('div', { class: 'stack' }, countdownCard(), progressCard(), licenceCard());
+  return h('div', { class: 'stack' }, countdownCard(), progressCard(), storageCard(), licenceCard());
 }
 
 function countdownParts() {
@@ -883,6 +900,99 @@ async function grade(g) {
     render();
     window.scrollTo(0, 0);
   }
+}
+
+// ───────────────────────── installation sur l'écran d'accueil ─────────────────────────
+
+const INSTALL_SNOOZE = 'rem.install.later';
+const INST = { prompt: null, open: false, persisted: null };
+const standalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+const inAppBrowser = () => /FBAN|FBAV|Instagram|Line\/|Snapchat|TikTok|; wv\)/i.test(navigator.userAgent);
+const isIOS = () => /iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+// Chrome signale que la page est installable : on garde son invite pour notre bouton
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  INST.prompt = e;
+  maybeOfferInstall();
+});
+window.addEventListener('appinstalled', () => {
+  INST.prompt = null;
+  closeInstall();
+  if (navigator.storage && navigator.storage.persist) navigator.storage.persist().then((p) => { INST.persisted = p; render(); }).catch(() => {});
+  toast('Rémanence est installée : ouvre-la depuis son icône.');
+});
+
+/** Propose l'installation une fois le contenu ouvert (pas en séance), sauf si déjà installée ou repoussée. */
+function maybeOfferInstall(force = false) {
+  if (standalone() || INST.open || !S.data || S.screen !== 'home') return;
+  let later = 0;
+  try { later = Number(localStorage.getItem(INSTALL_SNOOZE)) || 0; } catch { /* stockage indisponible */ }
+  if (!force && Date.now() < later) return;
+  openInstall();
+}
+
+function openInstall() {
+  INST.open = true;
+  const close = (snooze) => {
+    if (snooze) { try { localStorage.setItem(INSTALL_SNOOZE, String(Date.now() + 3 * DAY)); } catch { /* idem */ } }
+    closeInstall();
+  };
+  const why = h('ul', {},
+    h('li', {}, 'Une icône sur l’écran d’accueil, en plein écran, comme une appli.'),
+    h('li', {}, 'Ta progression est mieux protégée : Chrome ne l’efface pas quand le téléphone manque de place.'),
+    h('li', {}, 'Fonctionne hors ligne.'));
+  let body;
+  if (INST.prompt) {
+    const go = h('button', { class: 'primary wide', id: 'install-go' }, 'Installer Rémanence');
+    go.addEventListener('click', async () => {
+      const p = INST.prompt;
+      INST.prompt = null;
+      try {
+        await p.prompt();
+        const { outcome } = await p.userChoice;
+        if (outcome !== 'accepted') close(true);
+      } catch {
+        close(false);
+      }
+    });
+    body = [why, go];
+  } else if (inAppBrowser()) {
+    body = [h('p', {}, 'Tu es dans le navigateur d’une autre appli : la progression risque de ne pas être gardée.'),
+      h('ol', {}, h('li', {}, 'Touche le menu ', h('kbd', {}, '⋮'), ' ou ', h('kbd', {}, '…'), '.'), h('li', {}, 'Choisis « Ouvrir dans Chrome » (ou « dans le navigateur »).'), h('li', {}, 'Rouvre ton lien de licence, puis installe la page.'))];
+  } else if (isIOS()) {
+    body = [why, h('ol', {}, h('li', {}, 'Dans Safari, touche ', h('kbd', {}, 'Partager'), '.'), h('li', {}, 'Choisis « Sur l’écran d’accueil ».'))];
+  } else {
+    body = [why, h('ol', {}, h('li', {}, 'Touche le menu ', h('kbd', {}, '⋮'), ' de Chrome, en haut à droite.'), h('li', {}, 'Choisis « Installer l’application » (ou « Ajouter à l’écran d’accueil »).'))];
+  }
+  const veil = h('div', { class: 'install-veil', id: 'install', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'install-t' },
+    h('div', { class: 'install' },
+      h('div', { class: 'install-head' }, h('img', { src: 'icon-192.png', alt: '' }), h('div', {}, h('h2', { id: 'install-t' }, 'Installe Rémanence'), h('span', { class: 'muted small' }, 'sur ton écran d’accueil'))),
+      ...body,
+      h('button', { class: 'secondary wide', id: 'install-later', onclick: () => close(true) }, 'Plus tard')));
+  veil.addEventListener('click', (e) => { if (e.target === veil) close(true); });
+  document.body.append(veil);
+}
+
+function closeInstall() {
+  INST.open = false;
+  const v = $('#install');
+  if (v) v.remove();
+}
+
+/** Ligne de la page « Ma licence » : stockage protégé ou non, et le bouton d'installation tant qu'elle ne l'est pas. */
+function storageCard() {
+  if (INST.persisted === null && navigator.storage && navigator.storage.persisted) navigator.storage.persisted().then((p) => { INST.persisted = p; if (S.tab === 'account') render(); }).catch(() => {});
+  const inst = standalone();
+  const prot = INST.persisted;
+  return h('div', { class: 'card' },
+    h('div', { class: 'card-head' }, h('h3', {}, 'Cet appareil')),
+    h('div', { class: 'card-body stack' },
+      h('dl', { class: 'kv' },
+        h('dt', {}, 'Appli installée'), h('dd', {}, h('span', { class: `led${inst ? '' : ' warn'}` }), inst ? 'oui' : 'non'),
+        h('dt', {}, 'Stockage protégé'), h('dd', {}, h('span', { class: `led${prot ? '' : ' warn'}` }), prot == null ? '…' : prot ? 'oui' : 'non')),
+      inst && prot ? null : h('p', { class: 'muted small' }, 'Non protégé : Chrome peut effacer ta progression si le téléphone manque de place. Installer la page la protège.'),
+      inst ? null : h('button', { class: 'primary wide', id: 'install-open', onclick: () => maybeOfferInstall(true) }, 'Installer l’application')));
 }
 
 // ───────────────────────── démarrage ─────────────────────────

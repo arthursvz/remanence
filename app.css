@@ -185,6 +185,22 @@ body.has-tabs #toasts { bottom: calc(86px + env(safe-area-inset-bottom)); }
 .life span { display: block; height: 100%; background: var(--amber); }
 .life-legend { display: flex; justify-content: space-between; font: 11.5px var(--mono); color: var(--dim); }
 
+/* proposition d'installation */
+/* pas de fondu d'opacité : si l'animation ne tourne pas, la fenêtre reste visible */
+.install-veil { position: fixed; inset: 0; z-index: 20; background: rgba(5, 7, 10, .72); display: grid; align-items: end; padding: 16px 12px calc(16px + env(safe-area-inset-bottom)); }
+.install { background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px; padding: 22px 18px 16px; display: grid; gap: 14px; max-width: 520px; width: 100%; margin: 0 auto; box-shadow: 0 -10px 40px rgba(0, 0, 0, .5); animation: sheet-in .25s ease-out; }
+@keyframes sheet-in { from { transform: translateY(24px); } }
+.install-head { display: flex; align-items: center; gap: 14px; }
+.install-head img { width: 56px; height: 56px; border-radius: 12px; border: 1px solid var(--line-strong); flex: none; }
+.install-head h2 { font-size: 20px; }
+.install ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.install li { display: flex; gap: 10px; font-size: 14.5px; }
+.install ul li::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--amber); margin-top: 8px; flex: none; }
+.install ol { margin: 0; padding-left: 22px; display: grid; gap: 6px; font-size: 14.5px; }
+.install ol li { display: list-item; }
+.install .primary { padding: 16px; font-size: 17px; }
+.install kbd { font: 12px var(--mono); border: 1px solid var(--line-strong); border-radius: 4px; padding: 1px 6px; color: var(--text); }
+
 #toasts { position: fixed; left: 16px; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom)); display: grid; gap: 8px; z-index: 10; pointer-events: none; }
 .toast { background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--r); padding: 11px 14px 11px 30px; position: relative; font-size: 14px; box-shadow: 0 8px 24px rgba(0, 0, 0, .4); animation: toast-in .18s ease-out; }
 .toast::before { content: ""; position: absolute; left: 13px; top: 18px; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
