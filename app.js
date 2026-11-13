@@ -79,7 +79,7 @@ const del = (k) => idb('readwrite', (s) => s.delete(k));
 // progression rangée par personne (p : gardé quand la licence est prolongée) ; licences sans p : par nom
 const progKey = () => `progress:${S.lic.p ? `p:${S.lic.p}` : S.lic.h}`;
 const samePerson = (a, b) => (a.p && b.p ? a.p === b.p : a.h === b.h);
-const blankProg = () => ({ log: [], seen: {}, days: {}, cfg: {}, lastBackup: 0, lastSeen: 0 });
+const blankProg = () => ({ log: [], seen: {}, days: {}, cfg: {}, base: {}, lastBackup: 0, lastSeen: 0 });
 
 /** Enregistre la progression ; une écriture refusée est signalée, jamais ignorée. */
 async function saveProg() {
@@ -272,8 +272,12 @@ function rebuildSrs() {
   if (!S.data) return;
   const byCard = new Map();
   for (const e of S.prog.log) (byCard.get(e.c) || byCard.set(e.c, []).get(e.c)).push(e);
+  const imported = S.prog.base || {}; // instantanés importés depuis Dawn (licence propriétaire)
+  const lastOf = (x) => (x && x.last ? Date.parse(x.last) : 0);
   for (const c of S.data.cards) {
-    let s = S.data.base[c.id] || newSrs();
+    const a = S.data.base[c.id];
+    const b = imported[c.id];
+    let s = (lastOf(b) > lastOf(a) ? b : a) || newSrs(); // le plus récent des deux points de départ
     const from = s.last ? Date.parse(s.last) : 0;
     for (const e of (byCard.get(c.id) || []).sort((a, b) => a.at - b.at)) if (e.at > from) s = R.review(s, e.g, e.at, e.r || 0.9);
     S.srs.set(c.id, s);
@@ -478,8 +482,10 @@ function progressCard() {
       h('dl', { class: 'kv' },
         h('dt', {}, 'Réponses enregistrées'), h('dd', {}, String(S.prog.log.length)),
         h('dt', {}, 'Dernière sauvegarde'), h('dd', {}, last)),
-      h('p', { class: 'muted small' }, 'Elle n’existe que sur ce téléphone, dans ce navigateur. Exporte-la régulièrement : le fichier sert de sauvegarde, et de retour vers Dawn.'),
+      h('p', { class: 'muted small' }, 'Elle n’existe que sur ce téléphone, dans ce navigateur. Exporte-la régulièrement : le fichier (dans Téléchargements) sert de sauvegarde, et de retour vers Dawn.'),
+      S.lic.o ? h('p', { class: 'muted small' }, 'Licence propriétaire : « Importer ma progression » accepte aussi le fichier exporté par Dawn sur ton PC (seules les révisions plus récentes sont reprises).') : null,
       h('button', { class: 'primary wide', id: 'prog-export', disabled: !S.keys || !S.keys.k || !S.prog.log.length, onclick: exportProgress }, 'Exporter ma progression'),
+      navigator.canShare ? h('button', { class: 'link', id: 'prog-share', disabled: !S.keys || !S.keys.k || !S.prog.log.length, onclick: shareProgress }, 'Envoyer directement (Drive, mail…)') : null,
       h('button', { class: 'secondary wide', id: 'prog-import', disabled: !S.keys || !S.keys.k, onclick: () => $('#file-progress').click() }, 'Importer ma progression')));
 }
 
@@ -500,31 +506,49 @@ function licenceCard() {
 
 // ───────────────────────── progression : exporter, importer ─────────────────────────
 
+/** Fichier de progression chiffré (clé du canal). */
+async function progressFile() {
+  const header = { channel: S.lic.ch, licence: S.lic.id, holder: S.lic.h, owner: !!S.lic.o, exportedAt: new Date().toISOString(), reviews: S.prog.log.length };
+  const bin = await X.sealProgress(S.keys.k, header, { log: S.prog.log, seen: S.prog.seen, days: S.prog.days, cfg: S.prog.cfg, ...(S.lic.o ? { base: S.prog.base || {} } : {}) });
+  const name = `remanence-${norm(S.lic.h).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'progression'}-${dayOf()}.remprog`;
+  return new File([bin], name, { type: 'application/octet-stream' });
+}
+
+async function markBackup(how) {
+  S.prog.lastBackup = Date.now();
+  await saveProg();
+  toast(`Progression ${how} (${plural(S.prog.log.length, 'réponse')}).`);
+  render();
+}
+
+/**
+ * Exporter : le fichier est enregistré dans Téléchargements. (Le partage de Chrome Android refuse les types de
+ * fichiers qu'il ne connaît pas, avec « Permission denied » : il n'est qu'une option, voir shareProgress.)
+ */
 async function exportProgress() {
   try {
-    const header = { channel: S.lic.ch, licence: S.lic.id, holder: S.lic.h, owner: !!S.lic.o, exportedAt: new Date().toISOString(), reviews: S.prog.log.length };
-    const bin = await X.sealProgress(S.keys.k, header, { log: S.prog.log, seen: S.prog.seen, days: S.prog.days, cfg: S.prog.cfg });
-    const name = `remanence-${norm(S.lic.h).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'progression'}-${dayOf()}.remprog`;
-    const file = new File([bin], name, { type: 'application/octet-stream' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      try {
-        await navigator.share({ files: [file], title: 'Progression Rémanence' });
-      } catch (err) {
-        if (err.name === 'AbortError') return;
-        throw err;
-      }
-    } else {
-      const a = h('a', { href: URL.createObjectURL(file), download: name });
-      document.body.append(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
-    }
-    S.prog.lastBackup = Date.now();
-    await saveProg();
-    toast(`Progression exportée (${plural(S.prog.log.length, 'réponse')}).`);
-    render();
+    const file = await progressFile();
+    const a = h('a', { href: URL.createObjectURL(file), download: file.name });
+    document.body.append(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+    await markBackup('enregistrée dans Téléchargements');
   } catch (err) {
     toast(`Export impossible : ${err.message}`, true);
+  }
+}
+
+/** Envoyer directement (Drive, mail…) quand le navigateur l'accepte ; sinon, repli sur l'enregistrement. */
+async function shareProgress() {
+  let file;
+  try {
+    file = await progressFile();
+    await navigator.share({ files: [file], title: 'Progression Rémanence' });
+    await markBackup('envoyée');
+  } catch (err) {
+    if (err && err.name === 'AbortError') return;
+    toast('Ce navigateur refuse d’envoyer ce type de fichier : il est enregistré dans Téléchargements à la place.');
+    await exportProgress();
   }
 }
 
@@ -536,6 +560,7 @@ $('#file-progress').addEventListener('change', async (e) => {
     const buf = new Uint8Array(await f.arrayBuffer());
     const head = X.progressHeader(buf);
     if (head.channel !== S.lic.ch) throw new Error('Cette progression vient d’une autre clé de canal que ta licence.');
+    if (head.kind === 'snapshot') return await importSnapshot(buf, head);
     if (head.holder !== S.lic.h && !confirm(`Cette progression est celle de « ${head.holder} », pas la tienne (« ${S.lic.h} »). La fusionner quand même ?`)) return;
     const { data } = await X.openProgress(buf, S.keys.k);
     const seen = new Set(S.prog.log.map((x) => `${x.c}|${x.at}`));
@@ -544,6 +569,12 @@ $('#file-progress').addEventListener('change', async (e) => {
     for (const [d, n] of Object.entries(data.seen || {})) S.prog.seen[d] = Math.max(S.prog.seen[d] || 0, Number(n) || 0);
     for (const [d, v] of Object.entries(data.days || {})) if (!S.prog.days[d] || (v && v.n > S.prog.days[d].n)) S.prog.days[d] = v;
     if (!Object.keys(S.prog.cfg || {}).length && data.cfg) S.prog.cfg = data.cfg;
+    // sauvegarde d'une licence propriétaire : instantanés de Dawn qu'elle contenait (le plus récent gagne)
+    if (S.lic.o && data.base && typeof data.base === 'object') {
+      S.prog.base = S.prog.base || {};
+      const lastOf = (x) => (x && x.last ? Date.parse(x.last) : 0);
+      for (const [id, srs] of Object.entries(data.base)) if (srs && lastOf(srs) > lastOf(S.prog.base[id])) S.prog.base[id] = srs;
+    }
     S.prog.lastSeen = Math.max(S.prog.lastSeen || 0, ...add.map((x) => x.at));
     await saveProg();
     rebuildSrs();
@@ -553,6 +584,28 @@ $('#file-progress').addEventListener('change', async (e) => {
     toast(`Import impossible : ${err.message}`, true);
   }
 });
+
+/**
+ * Export de Dawn (PC) : ton planning à cette date, carte par carte. Il devient le point de départ de chaque carte
+ * s'il est plus récent ; tes réponses faites ici après cette date sont rejouées par-dessus (rien n'est perdu).
+ */
+async function importSnapshot(buf, head) {
+  if (!S.lic.o || !S.keys.ok) throw new Error('Ce fichier est le planning de Dawn : seule la licence propriétaire peut l’importer.');
+  const { data } = await X.openProgress(buf, S.keys.ok);
+  const lastOf = (x) => (x && x.last ? Date.parse(x.last) : 0);
+  const known = new Set(S.data.cards.map((c) => c.id));
+  S.prog.base = S.prog.base || {};
+  let n = 0;
+  for (const [id, srs] of Object.entries(data.srs || {})) {
+    if (!known.has(id) || !srs || typeof srs !== 'object') continue;
+    const cur = lastOf(S.prog.base[id]) > lastOf(S.data.base[id]) ? S.prog.base[id] : S.data.base[id];
+    if (lastOf(srs) > lastOf(cur)) { S.prog.base[id] = srs; n += 1; }
+  }
+  await saveProg();
+  rebuildSrs();
+  toast(n ? `Planning de Dawn importé (${fmtDate(Date.parse(head.exportedAt))}) : ${plural(n, 'carte')} mise${n > 1 ? 's' : ''} à jour.` : 'Rien de nouveau : ce planning est déjà là.');
+  render();
+}
 
 // ───────────────────────── pages du PDF ─────────────────────────
 
