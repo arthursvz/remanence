@@ -38,6 +38,7 @@ const pad = (n) => String(n).padStart(2, '0');
 const dayOf = (t = Date.now()) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 const endOfDay = () => { const d = new Date(); d.setHours(23, 59, 59, 999); return d.getTime(); };
 const fmtDate = (t) => new Date(t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+const fmtDateTime = (t) => new Date(t).toLocaleString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' });
 const pct = (x) => (x == null ? '—' : `${Math.round(x * 100)} %`);
 const plural = (n, w) => `${n} ${w}${n > 1 ? 's' : ''}`;
 const norm = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
@@ -455,7 +456,7 @@ function countdownCard() {
   const total = Math.max(1, S.lic.exp - (S.lic.iat || S.lic.exp - DAY));
   const used = Math.min(1, Math.max(0, 1 - c.ms / total));
   return h('div', { class: 'card' },
-    h('div', { class: 'card-head' }, h('h3', {}, 'Fin de la licence'), h('span', { class: 'mono small muted' }, fmtDate(S.lic.exp))),
+    h('div', { class: 'card-head' }, h('h3', {}, 'Fin de la licence'), h('span', { class: 'mono small muted' }, fmtDateTime(S.lic.exp))),
     h('div', { class: 'card-body stack' },
       h('div', { class: `countdown${c.d < 7 ? ' warn' : ''}${!c.ms ? ' over' : ''}`, id: 'countdown' },
         cell('cd-d', c.d, c.d > 1 ? 'jours' : 'jour'), cell('cd-h', c.h, 'heures'), cell('cd-m', c.m, 'min'), cell('cd-s', c.s, 's')),
@@ -473,6 +474,11 @@ setInterval(() => {
   $('#cd-life').style.width = `${(Math.min(1, Math.max(0, 1 - c.ms / total)) * 100).toFixed(2)}%`;
   if (!c.ms) checkLicence();
 }, 1000);
+
+/** Péremption pendant que l'appli est ouverte, quelle que soit la page (séance comprise). */
+setInterval(() => {
+  if (S.lic && S.keys && S.keys.k && Date.now() > S.lic.exp && S.screen !== 'licence') { S.session = null; checkLicence(); }
+}, 15000);
 
 function progressCard() {
   const last = S.prog.lastBackup ? fmtDate(S.prog.lastBackup) : 'jamais';
@@ -496,7 +502,7 @@ function licenceCard() {
     h('div', { class: 'card-body stack' },
       h('dl', { class: 'kv' },
         h('dt', {}, 'Titulaire'), h('dd', {}, S.lic.h + (S.lic.o ? ' · propriétaire' : '')),
-        h('dt', {}, 'Valable jusqu’au'), h('dd', {}, fmtDate(S.lic.exp)),
+        h('dt', {}, 'Valable jusqu’au'), h('dd', {}, fmtDateTime(S.lic.exp)),
         h('dt', {}, 'Paquet'), h('dd', {}, S.pack ? `${fmtDate(Date.parse(S.pack.createdAt))} · ${S.data.cards.length} cartes` : '—'),
         h('dt', {}, 'Référentiel'), h('dd', {}, S.data.doc ? `${S.data.doc.name} · ${S.data.doc.pages} p.` : '—')),
       h('div', { class: 'row' },
