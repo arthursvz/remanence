@@ -48,7 +48,7 @@
     const ok = await subtle.verify({ name: 'Ed25519' }, key, fromB64u(m[2]), enc.encode(`rml1.${m[1]}`));
     if (!ok) throw new RemError('BAD_SIGNATURE', 'Licence invalide : signature incorrecte.');
     const lic = JSON.parse(dec.decode(fromB64u(m[1])));
-    if (lic.v !== 1 || !lic.id || !lic.ch || !lic.k || !Number.isFinite(lic.exp)) throw new RemError('BAD_LICENCE', 'Licence incomplète.');
+    if (!(lic.v === 1 || (lic.v === 2 && lic.s)) || !lic.id || !lic.ch || !lic.k || !Number.isFinite(lic.exp)) throw new RemError('BAD_LICENCE', 'Licence incomplète.');
     return { ...lic, token: t };
   }
 
@@ -133,5 +133,42 @@
     return { header, data: JSON.parse(dec.decode(plain)) };
   }
 
-  return { RemError, parseLicence, aesKey, packHeader, openPack, openOwner, sealProgress, progressHeader, openProgress, fromB64u, toB64u };
+  /** Liste des licences autorisées (licences.json) : signée par l'éditeur ; renvoie { seq, at, entries }. */
+  async function parseLicences(obj, pubB64) {
+    const m = obj && typeof obj.list === 'string' ? /^rml2\.([A-Za-z0-9_-]+)$/.exec(obj.list) : null;
+    if (!m || typeof obj.sig !== 'string') throw new RemError('BAD_LIST', 'Liste des licences illisible.');
+    const key = await subtle.importKey('spki', fromB64(pubB64), { name: 'Ed25519' }, false, ['verify']);
+    const ok = await subtle.verify({ name: 'Ed25519' }, key, fromB64u(obj.sig), enc.encode(obj.list));
+    if (!ok) throw new RemError('BAD_SIGNATURE', 'Liste des licences : signature incorrecte.');
+    const p = JSON.parse(dec.decode(fromB64u(m[1])));
+    if (p.v !== 2 || !Number.isFinite(p.seq) || !p.entries || typeof p.entries !== 'object') throw new RemError('BAD_LIST', 'Liste des licences incomplète.');
+    return p;
+  }
+
+  /** Empreinte publique de l'identifiant d'une licence (clé de sa ligne dans licences.json). */
+  async function hidOf(id) {
+    return toB64u(new Uint8Array(await subtle.digest('SHA-256', enc.encode(`rem-hid/v2|${id}`)))).slice(0, 22);
+  }
+
+  /** Ligne de cette licence (null si elle n'y est pas) : { st, cur, mod, keys }, chiffrée avec son secret (CryptoKey). */
+  async function openEntry(list, id, sKey) {
+    if (!sKey) return null;
+    const hid = await hidOf(id);
+    const box = list.entries[hid];
+    if (!box) return null;
+    try {
+      const pt = await subtle.decrypt({ name: 'AES-GCM', iv: fromB64u(box.iv), additionalData: enc.encode(`rem-entry/v2|${hid}|${list.seq}`) }, sKey, fromB64u(box.ct));
+      return JSON.parse(dec.decode(pt));
+    } catch {
+      throw new RemError('BAD_ENTRY', 'Ligne de licence illisible.');
+    }
+  }
+
+  /** Code des cas concrets : [[nom, texte], …] dans l'ordre de chargement. */
+  async function openSim(buf, key) {
+    const { header, plain } = await open('RMSM', buf, key);
+    return { header, files: JSON.parse(dec.decode(plain)).files };
+  }
+
+  return { RemError, parseLicence, parseLicences, openEntry, openSim, hidOf, aesKey, packHeader, openPack, openOwner, sealProgress, progressHeader, openProgress, fromB64u, toB64u };
 });

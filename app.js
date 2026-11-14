@@ -6,6 +6,10 @@
  *   paquet    pack.bin chiffré (PDF, fiches, cartes), gardé chiffré dans IndexedDB ; mis à jour d'après pack.json
  *   progression  propre à chaque personne et à cet appareil : journal des réponses { c, at, g, r } → état FSRS rejoué.
  *             Propriétaire : rejoué par-dessus le planning de Dawn contenu dans le paquet.
+ *   accès     licences.json (signé par l'éditeur) lu à chaque ouverture : la ligne de CETTE licence (chiffrée avec son secret)
+ *             donne l'état (active, en pause, révoquée), les droits (PSE1 / PSE2, cartes, cas concrets) et les clés des contenus.
+ *             Absente ou en pause → bloquée ; révoquée → licence, paquets et progression effacés ; sans vérification réussie
+ *             depuis 7 jours, la page demande du réseau. Cas concrets : sim.bin déchiffré puis chargé (scripts blob:).
  *   « Exporter ma progression » / « Importer ma progression » : fichier .remprog.pdf chiffré (sauvegarde, retour vers Dawn) ;
  *   extension .pdf pour que le partage et les sélecteurs Android l'acceptent : ce n'est pas un vrai PDF.
  * Logique de révision : shared/remanence.js (DawnRemanence), la même que sur le bureau.
@@ -17,9 +21,11 @@ const CFG = window.REM_CONFIG || {};
 const DAY = 86400000;
 const CRITICAL_RETENTION = 0.95;
 const BACKUP_NAG_DAYS = 7;
+const REVOKE_EVERY = 7 * DAY; // vérification de la liste des révocations au moins tous les 7 jours
+const REVOKE_RECHECK = 6 * 3600000; // au retour sur la page : pas plus d'une fois toutes les 6 heures
 const KIND = { qa: 'Question', cloze: 'Texte à trous', order: 'Ordre des étapes', list: 'Liste à citer', dialog: 'Dialogue', mask: 'Masque', zone: 'Zone de page' };
 
-const S = { lic: null, keys: null, pack: null, data: null, prog: null, srs: new Map(), pdf: null, session: null, screen: 'boot', tab: 'review', busy: '', error: '' };
+const S = { lic: null, keys: null, ent: null, simLoaded: false, pack: null, data: null, prog: null, srs: new Map(), pdf: null, session: null, screen: 'boot', tab: 'review', busy: '', error: '' };
 
 // ───────────────────────── outils ─────────────────────────
 
@@ -97,7 +103,7 @@ function cfg() {
   const c = (S.prog && S.prog.cfg) || {};
   return {
     exam: c.exam || '', newPerDay: Number(c.newPerDay) || 15, maxPerDay: Number(c.maxPerDay) || 200,
-    retention: Number(c.retention) || 0.9, cursus: c.cursus === 'PSE1' ? 'PSE1' : 'PSE2', typed: !!c.typed,
+    retention: Number(c.retention) || 0.9, cursus: c.cursus === 'PSE1' || (S.ent && S.ent.cur === 'PSE1') ? 'PSE1' : 'PSE2', typed: !!c.typed,
   };
 }
 async function setCfg(patch) {
@@ -117,32 +123,111 @@ async function boot() {
     if (fromLink) await installLicence(fromLink);
     if (!S.lic) return show('licence');
     if (!(await checkLicence())) return;
-    await loadPack();
-    if (S.data) show('home');
+    if (!(await accessGate())) return;
+    await openContent();
+    show('home');
     checkUpdate(false);
   } catch (err) {
     S.error = err.message;
-    show(S.lic ? 'home' : 'licence');
+    show(S.lic && S.data ? 'home' : 'licence');
   }
+}
+
+/**
+ * Ligne de cette licence dans licences.json : { status: 'ok', ent } | { status: 'absent' } | { status: 'offline' }
+ * (pas de vérification valable : hors ligne, liste absente, altérée, ou plus ancienne que la dernière vue).
+ */
+async function fetchEntry(lic, sKey) {
+  if (!navigator.onLine) return { status: 'offline' };
+  let res;
+  try {
+    res = await fetch('licences.json', { cache: 'no-store' });
+  } catch {
+    return { status: 'offline' };
+  }
+  if (!res.ok) return { status: 'offline' };
+  let list;
+  try {
+    list = await X.parseLicences(await res.json(), CFG.pub);
+  } catch {
+    return { status: 'offline' };
+  }
+  const seen = (await get('listseq')) || 0;
+  if (list.seq < seen) return { status: 'offline' };
+  await put('listseq', list.seq);
+  if (lic.v !== 2) return { status: 'absent' };
+  const e = await X.openEntry(list, lic.id, sKey);
+  if (!e) return { status: 'absent' };
+  const keys = {};
+  for (const k of ['p1', 'p2', 'sim']) if (e.keys && e.keys[k]) keys[k] = await X.aesKey(e.keys[k]);
+  const mod = { cards: !!(e.mod && e.mod.cards), sim: !!(e.mod && e.mod.sim) };
+  return { status: 'ok', ent: { lid: lic.id, st: e.st, cur: e.cur === 'PSE1' ? 'PSE1' : 'PSE2', mod, keys, seq: list.seq, at: Date.now() } };
+}
+
+/** Licence révoquée : licence, paquets, cas concrets et progression effacés de l'appareil. */
+async function revokeHere() {
+  const who = S.lic ? S.lic.h : '';
+  if (S.lic) await del(progKey()).catch(() => {});
+  for (const k of ['licence', 'pack', 'pack2', 'simbin', 'entry']) await del(k).catch(() => {});
+  Object.assign(S, { lic: null, keys: null, ent: null, pack: null, data: null, prog: null, pdf: null, session: null });
+  S.srs = new Map();
+  S.error = `La licence${who ? ` de ${who}` : ''} a été révoquée par son émetteur : licence, paquet et progression ont été effacés de ce téléphone.`;
+  show('licence');
+}
+
+/** À l'ouverture (force) ou au retour sur la page : état et droits lus sur le site ; hors ligne, 7 jours au plus. */
+async function accessGate(force = true) {
+  const now = Date.now();
+  const cached = await get('entry');
+  const mine = cached && cached.lid === S.lic.id ? cached : null;
+  if (!force && mine && mine.st === 'active' && now - mine.at < REVOKE_RECHECK && now >= mine.at) { S.ent = mine; return true; }
+  const r = await fetchEntry(S.lic, S.keys && S.keys.s);
+  if (r.status === 'ok') {
+    if (r.ent.st === 'revoked') { await revokeHere(); return false; }
+    await put('entry', r.ent);
+    S.ent = r.ent;
+    if (r.ent.st !== 'active') {
+      S.error = 'Accès suspendu par l’émetteur de la licence. Tes données restent sur ce téléphone ; l’accès reviendra quand il le rétablira.';
+      show('licence');
+      return false;
+    }
+    return true;
+  }
+  if (r.status === 'absent') {
+    S.error = S.lic.v !== 2
+      ? 'Licence d’ancien format : demande un nouveau lien à son émetteur (Prolonger). Ta progression est gardée.'
+      : 'Cette licence n’est pas autorisée sur le site : elle n’est pas encore activée, ou elle a été retirée. Demande à son émetteur.';
+    show('licence');
+    return false;
+  }
+  if (mine && mine.st === 'active' && now - mine.at < REVOKE_EVERY && now >= mine.at - DAY) { S.ent = mine; return true; }
+  S.error = 'Connecte le téléphone à Internet : la licence doit être vérifiée au moins une fois tous les 7 jours. Tes données restent sur le téléphone.';
+  show('licence');
+  return false;
 }
 
 async function loadLicence() {
   const rec = await get('licence');
   if (!rec) return;
   S.lic = rec.lic;
-  S.keys = { k: rec.k, ok: rec.ok || null };
+  S.keys = { k: rec.k, ok: rec.ok || null, s: rec.s || null };
 }
 
-/** Vérifie, puis range la licence : les clés deviennent des CryptoKey non extractables. */
+/** Vérifie, puis range la licence : les clés et le secret deviennent des CryptoKey non extractables. */
 async function installLicence(token) {
   const lic = await X.parseLicence(token, CFG.pub);
   if (Date.now() > lic.exp) throw new Error(`Cette licence a expiré le ${fmtDate(lic.exp)}.`);
-  const keys = { k: await X.aesKey(lic.k), ok: lic.ok ? await X.aesKey(lic.ok) : null };
-  const { k, ok, token: _t, ...pub } = lic;
+  if (lic.v !== 2) throw new Error('Lien d’ancien format : demande un nouveau lien à son émetteur.');
+  const keys = { k: await X.aesKey(lic.k), ok: lic.ok ? await X.aesKey(lic.ok) : null, s: await X.aesKey(lic.s) };
+  const r = await fetchEntry(lic, keys.s);
+  if (r.status === 'absent') throw new Error('Cette licence n’est pas encore activée sur le site : demande à son émetteur de publier les licences.');
+  if (r.status === 'ok' && r.ent.st === 'revoked') throw new Error('Cette licence a été révoquée par son émetteur.');
+  const { k, ok, s: _s, token: _t, ...pub } = lic;
   const prev = S.lic;
   const same = prev && samePerson(prev, pub);
   if (prev && !same && !confirm(`Cette licence est au nom de « ${pub.h} » (l’actuelle : « ${prev.h} »). Chaque personne garde sa propre progression sur cet appareil. Continuer ?`)) return false;
-  await put('licence', { lic: pub, k: keys.k, ok: keys.ok });
+  await put('licence', { lic: pub, k: keys.k, ok: keys.ok, s: keys.s });
+  if (r.status === 'ok') await put('entry', r.ent);
   S.lic = pub;
   S.keys = keys;
   S.prog = null;
@@ -171,8 +256,8 @@ async function checkLicence() {
     return false;
   }
   if (now > S.lic.exp) {
-    await put('licence', { lic: S.lic, k: null, ok: null, expired: true });
-    S.keys = { k: null, ok: null };
+    await put('licence', { lic: S.lic, k: null, ok: null, s: null, expired: true });
+    S.keys = { k: null, ok: null, s: null };
     S.error = `La licence de ${S.lic.h} a expiré le ${fmtDate(S.lic.exp)}. Demande un nouveau lien ; ta progression est gardée.`;
     show('licence');
     return false;
@@ -186,21 +271,37 @@ async function checkLicence() {
   return true;
 }
 
-async function loadPack() {
-  const rec = await get('pack');
-  if (!rec) return downloadPack();
-  if (rec.header.channel !== S.lic.ch) return downloadPack();
-  await openPack(rec.buf);
+/** Contenus selon les droits : cartes (pack.bin, pack2.bin si PSE2) et cas concrets (sim.bin). */
+async function openContent() {
+  if (S.ent.mod.cards) await loadPack();
+  else { S.pack = null; S.data = { doc: null, fiches: [], cards: [], base: {} }; rebuildSrs(); }
+  if (S.ent.mod.sim) await loadSim().catch((err) => toast(`Cas concrets indisponibles : ${err.message}`, true));
+  if (S.tab === 'review' && !S.ent.mod.cards) S.tab = 'sim';
+  if (S.tab === 'sim' && !S.ent.mod.sim) S.tab = 'review';
 }
 
-async function openPack(buf) {
-  const { header, data, pdf } = await X.openPack(buf, S.keys.k);
+async function loadPack() {
+  const rec = await get('pack');
+  const rec2 = S.ent.keys.p2 ? await get('pack2') : null;
+  if (!rec || rec.header.channel !== S.lic.ch || (S.ent.keys.p2 && (!rec2 || rec2.header.packId !== rec.header.packId))) return downloadPack();
+  try {
+    await openPack(rec.buf, rec2 && rec2.buf);
+  } catch {
+    await downloadPack(); // clés tournées depuis : le paquet gardé ne s'ouvre plus
+  }
+}
+
+async function openPack(buf, buf2) {
+  if (!S.ent.keys.p1) throw new Error('Pas d’accès aux cartes avec cette licence.');
+  const { header, data, pdf } = await X.openPack(buf, S.ent.keys.p1);
+  let cards = data.cards;
+  if (S.ent.keys.p2 && buf2) cards = cards.concat((await X.openPack(buf2, S.ent.keys.p2)).data.cards);
   let base = {};
   if (S.lic.o && S.keys.ok && data.owner) {
     try { base = (await X.openOwner(data.owner, S.keys.ok, header.packId)).srs || {}; } catch { base = {}; }
   }
   S.pack = header;
-  S.data = { ...data, base };
+  S.data = { ...data, cards, base };
   if (S.pdf) S.pdf.destroy();
   S.pdf = null;
   S.pdfBytes = pdf;
@@ -209,50 +310,98 @@ async function openPack(buf) {
   rebuildSrs();
 }
 
-/** Télécharge pack.bin (progression affichée), vérifie qu'il s'ouvre avec la licence, puis le garde chiffré. */
+/** Télécharge un fichier du site en affichant la progression. */
+async function fetchBin(name, meta, size) {
+  const res = await fetch(`${name}?v=${encodeURIComponent((meta && meta.packId) || Date.now())}`, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`${name} introuvable sur le site (${res.status}).`);
+  const total = Number(res.headers.get('content-length')) || size || 0;
+  const reader = res.body.getReader();
+  const parts = [];
+  let got = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    parts.push(value);
+    got += value.length;
+    const bar = $('#dl-bar');
+    if (bar && total) bar.style.width = `${Math.min(100, (got / total) * 100).toFixed(1)}%`;
+    const txt = $('#dl-txt');
+    if (txt) txt.textContent = `${(got / 1048576).toFixed(1)} Mo${total ? ` / ${(total / 1048576).toFixed(1)} Mo` : ''}`;
+  }
+  const buf = new Uint8Array(got);
+  let o = 0;
+  for (const p of parts) { buf.set(p, o); o += p.length; }
+  return buf;
+}
+
+/** Télécharge les paquets permis par les droits, vérifie qu'ils s'ouvrent, puis les garde chiffrés. */
 async function downloadPack(meta) {
   S.busy = 'Téléchargement du paquet…';
   show('busy');
   try {
-    const res = await fetch(`pack.bin?v=${encodeURIComponent((meta && meta.packId) || Date.now())}`, { cache: 'no-store' });
-    if (!res.ok) throw new Error(`Paquet introuvable sur le site (${res.status}).`);
-    const total = Number(res.headers.get('content-length')) || (meta && meta.size) || 0;
-    const reader = res.body.getReader();
-    const parts = [];
-    let got = 0;
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      parts.push(value);
-      got += value.length;
-      const bar = $('#dl-bar');
-      if (bar && total) bar.style.width = `${Math.min(100, (got / total) * 100).toFixed(1)}%`;
-      const txt = $('#dl-txt');
-      if (txt) txt.textContent = `${(got / 1048576).toFixed(1)} Mo${total ? ` / ${(total / 1048576).toFixed(1)} Mo` : ''}`;
-    }
-    const buf = new Uint8Array(got);
-    let o = 0;
-    for (const p of parts) { buf.set(p, o); o += p.length; }
-    await installPack(buf);
+    const buf = await fetchBin('pack.bin', meta, meta && meta.size);
+    const buf2 = S.ent.keys.p2 ? await fetchBin('pack2.bin', meta, meta && meta.size2) : null;
+    await installPack(buf, buf2);
   } finally {
     S.busy = '';
   }
 }
 
-async function installPack(buf) {
+async function installPack(buf, buf2) {
   const header = X.packHeader(buf);
   if (header.channel !== S.lic.ch) throw new Error('Ce paquet utilise une nouvelle clé : demande un nouveau lien de licence.');
-  await openPack(buf); // ne s'enregistre que s'il s'ouvre
-  await put('pack', { header, buf: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) });
+  await openPack(buf, buf2); // ne s'enregistre que s'il s'ouvre
+  const keep = (b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+  await put('pack', { header, buf: keep(buf) });
+  if (buf2) await put('pack2', { header: X.packHeader(buf2), buf: keep(buf2) });
+  else await del('pack2').catch(() => {});
   toast(`Paquet à jour : ${plural(S.data.cards.length, 'carte')}, ${plural(S.data.fiches.length, 'fiche')}.`);
+}
+
+/** Cas concrets : code chiffré (sim.bin), déchiffré avec la clé de la licence puis chargé dans la page, une fois. */
+async function loadSim(meta) {
+  if (S.simLoaded || !S.ent.keys.sim) return;
+  let rec = await get('simbin');
+  let opened = null;
+  if (rec && (!meta || rec.simId === meta.simId)) {
+    try { opened = await X.openSim(new Uint8Array(rec.buf), S.ent.keys.sim); } catch { opened = null; }
+  }
+  if (!opened) {
+    if (!navigator.onLine) throw new Error('hors ligne');
+    const buf = await fetchBin('sim.bin', meta, meta && meta.simSize);
+    opened = await X.openSim(buf, S.ent.keys.sim);
+    rec = { simId: opened.header.simId, buf: buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) };
+    await put('simbin', rec);
+  }
+  for (const [name, text] of opened.files) {
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/javascript' }));
+    await new Promise((resolve, reject) => {
+      const sc = document.createElement('script');
+      sc.src = url;
+      sc.onload = resolve;
+      sc.onerror = () => reject(new Error(`${name} illisible`));
+      document.body.append(sc);
+    });
+    URL.revokeObjectURL(url);
+  }
+  S.simLoaded = true;
 }
 
 async function checkUpdate(manual) {
   if (!navigator.onLine) { if (manual) toast('Hors ligne : réessaie avec du réseau.', true); return; }
   try {
+    if (!(await accessGate())) return;
     const res = await fetch('pack.json', { cache: 'no-store' });
     if (!res.ok) throw new Error(`pack.json : ${res.status}`);
     const meta = await res.json();
+    if (S.ent.mod.sim) {
+      const sr = await get('simbin');
+      if (!sr || sr.simId !== meta.simId) {
+        if (S.simLoaded) { await del('simbin'); toast('Les cas concrets ont été mis à jour : ils seront chargés à la prochaine ouverture.'); }
+        else await loadSim(meta).catch(() => {});
+      }
+    }
+    if (!S.ent.mod.cards) { if (manual) toast('Déjà à jour.'); return; }
     if (S.pack && meta.packId === S.pack.packId) { if (manual) toast('Déjà à jour.'); return; }
     if (meta.channel !== S.lic.ch) { toast('Une nouvelle version existe, mais elle demande un nouveau lien de licence.', true); return; }
     if (S.session) return; // pas en pleine séance
@@ -323,16 +472,19 @@ function show(screen) {
 function render() {
   const root = $('#root');
   const cur = $('#cursus');
-  cur.hidden = !(S.data && ['home', 'session', 'free'].includes(S.screen));
+  cur.hidden = !(S.data && S.ent && S.ent.mod.cards && S.ent.cur === 'PSE2' && ['home', 'session', 'free'].includes(S.screen));
   for (const b of cur.querySelectorAll('button')) b.setAttribute('aria-pressed', String(S.prog && b.dataset.cursus === cfg().cursus));
   $('#bar-sub').textContent = S.lic ? S.lic.h : 'référentiel PSE';
   const tabs = !!(S.data && S.screen === 'home');
   $('#tabs').hidden = !tabs;
   document.body.classList.toggle('has-tabs', tabs);
-  for (const b of document.querySelectorAll('#tabs button')) b.setAttribute('aria-selected', String(b.dataset.tab === S.tab));
+  for (const b of document.querySelectorAll('#tabs button')) {
+    b.setAttribute('aria-selected', String(b.dataset.tab === S.tab));
+    b.hidden = !!S.ent && ((b.dataset.tab === 'review' && !S.ent.mod.cards) || (b.dataset.tab === 'sim' && !S.ent.mod.sim));
+  }
   $('#tab-dot').hidden = !(tabs && needsBackup());
   const view = S.screen === 'licence' ? licenceView() : S.screen === 'busy' ? busyView() : S.screen === 'session' && S.session ? sessionView() : S.screen === 'free' && S.data ? freeView()
-    : S.screen === 'home' && S.data ? (S.tab === 'account' ? accountView() : homeView()) : S.screen === 'boot' ? h('p', { class: 'muted' }, 'Ouverture…') : licenceView();
+    : S.screen === 'home' && S.data ? (S.tab === 'account' ? accountView() : S.tab === 'sim' && S.ent && S.ent.mod.sim ? (typeof simView === 'function' ? simView() : h('p', { class: 'muted' }, 'Chargement des cas concrets…')) : homeView()) : S.screen === 'boot' ? h('p', { class: 'muted' }, 'Ouverture…') : licenceView();
   root.replaceChildren(view);
   if (S.screen === 'home' && !INST.offered) {
     INST.offered = true;
@@ -354,7 +506,8 @@ function licenceView() {
       S.error = '';
       if (!(await installLicence(ta.value))) return;
       if (!(await checkLicence())) return;
-      await loadPack();
+      if (!(await accessGate())) return;
+      await openContent();
       show('home');
     } catch (err) {
       S.error = err.message;
@@ -366,7 +519,8 @@ function licenceView() {
   return h('div', { class: 'stack' },
     S.error ? h('div', { class: 'callout err' }, S.error) : null,
     h('div', { class: 'card' }, h('div', { class: 'card-body stack' },
-      h('h2', {}, S.lic ? 'Licence à renouveler' : 'Bienvenue'),
+      h('h2', {}, S.lic && S.keys && S.keys.k ? 'Vérification de la licence' : S.lic ? 'Licence à renouveler' : 'Bienvenue'),
+      S.lic && S.keys && S.keys.k ? h('button', { class: 'secondary wide', id: 'lic-recheck', onclick: () => boot() }, 'Vérifier maintenant') : null,
       h('p', { class: 'muted small' }, 'Rémanence s’ouvre avec un lien de licence personnel, émis depuis Dawn. Ouvre le lien reçu, ou colle-le ci-dessous.'),
       ta, go)),
     h('div', { class: 'card' }, h('div', { class: 'card-body stack' },
@@ -541,6 +695,8 @@ function licenceCard() {
       h('dl', { class: 'kv' },
         h('dt', {}, 'Titulaire'), h('dd', {}, S.lic.h + (S.lic.o ? ' · propriétaire' : '')),
         h('dt', {}, 'Valable jusqu’au'), h('dd', {}, fmtDateTime(S.lic.exp)),
+        h('dt', {}, 'Accès'), h('dd', {}, S.ent ? [S.ent.mod.cards ? `cartes ${S.ent.cur}` : '', S.ent.mod.sim ? 'cas concrets' : ''].filter(Boolean).join(' + ') : '—'),
+        h('dt', {}, 'Vérifiée'), h('dd', {}, S.ent ? fmtDateTime(S.ent.at) : '—'),
         h('dt', {}, 'Paquet'), h('dd', {}, S.pack ? `${fmtDate(Date.parse(S.pack.createdAt))} · ${S.data.cards.length} cartes` : '—'),
         h('dt', {}, 'Référentiel'), h('dd', {}, S.data.doc ? `${S.data.doc.name} · ${S.data.doc.pages} p.` : '—')),
       h('div', { class: 'row' },
@@ -1089,12 +1245,25 @@ function storageCard() {
         h('dt', {}, 'Appli installée'), h('dd', {}, h('span', { class: `led${inst ? '' : ' warn'}` }), inst ? 'oui' : 'non'),
         h('dt', {}, 'Stockage protégé'), h('dd', {}, h('span', { class: `led${prot ? '' : ' warn'}` }), prot == null ? '…' : prot ? 'oui' : 'non')),
       inst && prot ? null : h('p', { class: 'muted small' }, 'Non protégé : Chrome peut effacer ta progression si le téléphone manque de place. Installer la page la protège.'),
-      inst ? null : h('button', { class: 'primary wide', id: 'install-open', onclick: () => maybeOfferInstall(true) }, 'Installer l’application')));
+      inst ? null : h('button', { class: 'primary wide', id: 'install-open', onclick: () => maybeOfferInstall(true) }, 'Installer l’application'),
+      h('label', { class: 'check' }, h('input', { type: 'checkbox', id: 'intro-on', checked: introOn(), onchange: (e) => { try { localStorage.setItem(INTRO_KEY, e.target.checked ? '1' : '0'); } catch { /* stockage indisponible */ } } }), h('span', {}, 'Animation à l’ouverture de l’appli installée')),
+      h('button', { class: 'link', style: 'padding:0;font-size:13px', onclick: () => playIntro(true) }, 'Revoir l’animation')));
+}
+
+// ───────────────────────── animation d'ouverture (la même que dans Dawn : remintro.js) ─────────────────────────
+
+const INTRO_KEY = 'rem.intro';
+const introOn = () => { try { return localStorage.getItem(INTRO_KEY) !== '0'; } catch { return true; } };
+/** À l'ouverture de l'appli installée (pas dans un onglet du navigateur), sauf si désactivée ; toucher pour passer. */
+function playIntro(force = false) {
+  if (typeof remIntroPlay !== 'function' || (!force && (!standalone() || !introOn()))) return;
+  remIntroPlay(document.body, { touch: true });
 }
 
 // ───────────────────────── démarrage ─────────────────────────
 
 if ('serviceWorker' in navigator && window.isSecureContext) navigator.serviceWorker.register('sw.js').catch(() => {});
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.lic && S.screen === 'home') checkLicence().then((ok) => ok && render()); });
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.lic && S.screen === 'home') checkLicence().then((ok) => ok && accessGate(false)).then((ok) => ok && render()); });
 window.addEventListener('hashchange', () => { if (/#lic=/.test(location.hash)) boot(); });
+playIntro();
 boot();
