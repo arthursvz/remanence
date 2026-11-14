@@ -2,7 +2,7 @@
 
 /* Rémanence mobile : la page marche hors ligne. Code en cache (version = empreinte posée par Dawn à l'export) ;
  * pack.json, pack.bin, pack2.bin, sim.bin et licences.json passent toujours par le réseau : l'appli les garde elle-même, chiffrés, dans IndexedDB. */
-const VERSION = 'rem-07a7688f3f606888';
+const VERSION = 'rem-ac7267a5c0bafa9f';
 const CODE = ['./', 'index.html', 'app.js', 'app.css', 'remcrypto.js', 'remanence.js', 'remintro.js', 'pdfview.js', 'config.js', 'manifest.webmanifest', 'icon.svg', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', (e) => {

@@ -262,3 +262,11 @@ body.has-tabs #toasts { bottom: calc(86px + env(safe-area-inset-bottom)); }
 .rem-intro canvas { position: absolute; inset: 0; }
 .rem-intro.out { opacity: 0; }
 .rem-intro-skip { position: absolute; right: 16px; bottom: calc(14px + env(safe-area-inset-bottom)); font-size: 11px; color: rgba(120, 214, 255, .45); letter-spacing: .08em; font-family: ui-monospace, monospace; }
+
+/* confiance avant la réponse */
+.conf { padding: 0 16px 16px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.conf > .muted { grid-column: 1 / -1; }
+.confb { padding: 14px 4px; background: var(--surface-2); border: 1px solid var(--line-strong); color: var(--text); font-weight: 600; }
+.confb.c-s, .conf-said.c-s b { color: var(--amber); }
+.conf-said { margin: 0; padding: 0 16px 8px; font-size: 13px; color: var(--dim); }
+.grade.capped span { text-decoration: line-through; }

@@ -104,7 +104,12 @@ function cfg() {
   return {
     exam: c.exam || '', newPerDay: Number(c.newPerDay) || 15, maxPerDay: Number(c.maxPerDay) || 200,
     retention: Number(c.retention) || 0.9, cursus: c.cursus === 'PSE1' || (S.ent && S.ent.cur === 'PSE1') ? 'PSE1' : 'PSE2', typed: !!c.typed,
+    confidence: c.confidence !== false, // confiance annoncée avant la réponse (Sûr, J'hésite, Je ne sais pas)
   };
+}
+/** La carte attend la confiance : réglage actif, rien choisi, réponse cachée (un dialogue commencé ne la redemande pas). */
+function askConf(s, card) {
+  return cfg().confidence && !s.conf && !s.shown && !(card.kind === 'dialog' && s.dlg && (s.dlg.i > 0 || s.dlg.open));
 }
 async function setCfg(patch) {
   S.prog.cfg = { ...S.prog.cfg, ...patch };
@@ -617,8 +622,9 @@ function homeView() {
   const max = h('input', { type: 'number', inputmode: 'numeric', min: '10', max: '2000', value: String(c.maxPerDay) });
   const ret = h('select', {}, ...[0.85, 0.9, 0.95].map((v) => h('option', { value: String(v), selected: v === c.retention }, `${Math.round(v * 100)} %`)));
   const typed = h('input', { type: 'checkbox', checked: c.typed });
-  const save = () => setCfg({ exam: exam.value, newPerDay: Math.min(200, Math.max(1, Number(per.value) || 15)), maxPerDay: Math.min(2000, Math.max(10, Number(max.value) || 200)), retention: Number(ret.value), typed: typed.checked });
-  for (const el of [exam, per, max, ret, typed]) el.addEventListener('change', save);
+  const conf = h('input', { type: 'checkbox', checked: c.confidence });
+  const save = () => setCfg({ exam: exam.value, newPerDay: Math.min(200, Math.max(1, Number(per.value) || 15)), maxPerDay: Math.min(2000, Math.max(10, Number(max.value) || 200)), retention: Number(ret.value), typed: typed.checked, confidence: conf.checked });
+  for (const el of [exam, per, max, ret, typed, conf]) el.addEventListener('change', save);
   wrap.append(h('div', { class: 'card' },
     h('div', { class: 'card-head' }, h('h3', {}, 'Mon plan')),
     h('div', { class: 'card-body stack' },
@@ -628,6 +634,7 @@ function homeView() {
         h('label', {}, 'Révisions / jour max.', max),
         h('label', {}, 'Rétention visée', ret)),
       h('label', { class: 'check' }, typed, h('span', {}, 'Taper la réponse avant de la voir')),
+      h('label', { class: 'check' }, conf, h('span', {}, 'Dire ma confiance avant de voir la réponse : une bonne réponse devinée ne compte pas comme acquise')),
       h('p', { class: 'muted small' }, 'Avec une échéance, les nouvelles cartes montent si besoin pour tout avoir vu une semaine avant. Les gestes vitaux visent toujours 95 %.'))));
   return wrap;
 }
@@ -1041,6 +1048,7 @@ function sessionView() {
     const o = s.order;
     body.append(h('ol', { class: 'steps' }, ...o.picked.map((i) => h('li', { class: 'ok' }, card.steps[i]))));
     if (s.shown) body.append(h('p', { class: 'muted small' }, o.errors ? `${plural(o.errors, 'erreur')} d’ordre.` : 'Sans erreur.'));
+    else if (askConf(s, card)) body.append(h('p', { class: 'muted small' }, 'Les étapes s’affichent une fois ta confiance donnée.'));
     else {
       body.append(h('div', { class: 'pool' }, ...o.pool.filter((x) => !o.picked.includes(x.i)).map((x) => h('button', {
         class: 'secondary',
@@ -1066,13 +1074,16 @@ function sessionView() {
   if (typable && !s.shown) {
     const inp = h('input', { class: 'typed', placeholder: 'Ta réponse', autocomplete: 'off', autocapitalize: 'off', enterkeyhint: 'done', value: s.typed || '' });
     inp.addEventListener('input', () => { s.typed = inp.value; });
-    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); reveal(); } });
+    inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); if (askConf(s, card)) inp.blur(); else reveal(); } });
     body.append(inp);
   } else if (typable && s.shown && s.check) {
     body.append(h('div', { class: `check-res g${s.check.grade}` }, h('span', { class: 'muted small' }, 'Ta réponse : '), s.typed || '—', h('br'), h('span', { class: 'muted small' }, 'Attendu : '), s.check.expected || '—'));
   }
   box.append(body);
-  if (!s.shown) {
+  if (!s.shown && askConf(s, card)) {
+    const b = (k) => h('button', { class: `confb c-${k}`, id: `conf-${k}`, onclick: () => chooseConf(k) }, R.CONF[k]);
+    box.append(h('div', { class: 'conf' }, h('span', { class: 'muted small' }, 'Avant de voir la réponse, tu es :'), b('s'), b('d'), b('u')));
+  } else if (!s.shown) {
     if (card.kind === 'dialog') {
       const open = s.dlg && s.dlg.open;
       box.append(h('div', { class: 'actions' },
@@ -1086,8 +1097,11 @@ function sessionView() {
       : card.kind === 'list' ? (ratio >= 0.9 ? 3 : ratio >= 0.6 ? 2 : 1)
         : card.kind === 'dialog' ? (!s.dlg.miss.length ? 3 : s.dlg.miss.length <= card.steps.length / 4 ? 2 : 1)
           : s.check ? s.check.grade : null;
-    box.append(h('div', { class: 'grades' }, ...[1, 2, 3, 4].map((g) => h('button', { class: `grade g${g}${suggest === g ? ' suggest' : ''}`, 'data-grade': String(g), onclick: () => grade(g) },
-      h('b', {}, R.GRADE_LABELS[g]), h('span', {}, s.free ? ' ' : prev[g])))));
+    // note retenue selon la confiance : devinée → au mieux « Difficile », en hésitant → pas « Facile »
+    const eff = (g) => R.confGrade(s.conf, g);
+    if (s.conf) box.append(h('p', { class: `conf-said c-${s.conf}` }, 'Confiance : ', h('b', {}, R.CONF[s.conf]), s.conf === 'u' ? ' · juste, elle comptera « Difficile »' : s.conf === 'd' ? ' · « Facile » comptera « Bien »' : ''));
+    box.append(h('div', { class: 'grades' }, ...[1, 2, 3, 4].map((g) => h('button', { class: `grade g${g}${suggest === g ? ' suggest' : ''}${eff(g) !== g ? ' capped' : ''}`, 'data-grade': String(g), onclick: () => grade(g) },
+      h('b', {}, R.GRADE_LABELS[g]), h('span', {}, s.free ? ' ' : prev[eff(g)])))));
   }
   wrap.append(box);
   return wrap;
@@ -1107,10 +1121,21 @@ function dialogMiss() {
   render();
 }
 
+/** Confiance choisie : la réponse s'ouvre (l'ordre montre ses étapes, le dialogue sa première réplique). */
+function chooseConf(k) {
+  const s = S.session;
+  const card = s && curCard();
+  if (!card || s.shown || s.conf) return;
+  s.conf = k;
+  if (card.kind === 'order') render();
+  else reveal();
+}
+
 async function reveal() {
   const s = S.session;
   if (!s || s.shown) return;
   const card = curCard();
+  if (askConf(s, card)) return;
   s.check = null;
   if (card.kind === 'dialog') {
     const d = s.dlg || (s.dlg = { i: 0, open: false, miss: [] });
@@ -1135,8 +1160,11 @@ async function grade(g) {
       const now = Date.now();
       const before = srsOf(card);
       const r = retention(card);
-      S.prog.log.push({ c: card.id, at: now, g, r });
-      S.srs.set(card.id, R.review(before, g, now, r));
+      // g : la note retenue (confiance comprise : le journal se rejoue tel quel, ici et dans Dawn) ; k : la confiance
+      // annoncée (Dawn compte les erreurs sûres à l'import : k « s » et g 1)
+      const eg = R.confGrade(s.conf, g);
+      S.prog.log.push({ c: card.id, at: now, g: eg, r, ...(s.conf ? { k: s.conf } : {}) });
+      S.srs.set(card.id, R.review(before, eg, now, r));
       const day = dayOf(now);
       if (before.state === 'new') S.prog.seen[day] = (S.prog.seen[day] || 0) + 1;
       const d = S.prog.days[day] || { n: 0, ms: 0 };
@@ -1146,8 +1174,8 @@ async function grade(g) {
     }
     s.queue.shift();
     s.done += 1;
-    if (g === 1) { s.again += 1; s.queue.splice(Math.min(s.queue.length, 4), 0, card.id); }
-    Object.assign(s, { shown: false, order: null, found: null, dlg: null, typed: '', check: null, t0: Date.now() });
+    if (g === 1) { s.again += 1; s.queue.splice(Math.min(s.queue.length, s.conf === 's' ? 1 : 4), 0, card.id); }
+    Object.assign(s, { shown: false, order: null, found: null, dlg: null, typed: '', check: null, conf: null, t0: Date.now() });
   } catch { /* déjà signalé par saveProg */ } finally {
     s.busy = false;
     render();

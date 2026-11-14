@@ -648,5 +648,87 @@
   /** Indices de données identifiantes dans un texte (libellés, sans doublon). */
   const identifyingHints = (text) => IDENT.filter(([, re]) => re.test(String(text || ''))).map(([label]) => label);
 
-  return { identifyingHints, diffText, diffWords, sameText, W, GRADES, GRADE_LABELS, NATURES, newState, review, preview, waitLabel, recall, isDue, retrievability, intervalFor, pace, cloze, hasCloze, codeOf, splitReferential, tocFiches, pdfPageMarkdown, pdfGrids, mdPlain, scoreCase, parseActions, actionsText, parseEvents, eventsText };
+  // ───────── « pourquoi » des gestes : phrases qui donnent la raison d'un geste ─────────
+  // « noter l'heure de pose afin de pouvoir la communiquer… », « … car … », « Afin de limiter…, il est préférable… ».
+  // `pour` seulement suivi d'un verbe de but (« pour éviter », « pour ne pas »…) : « pour les prises de sang » n'en est pas un.
+  const WHY_CONN = /(^|[\s(])(afin\s+(?:de|d['’]|qu['’]|que)|de\s+(?:façon|manière)\s+à|dans\s+le\s+but\s+(?:de|d['’])|ce\s+qui\s+permet(?:tra)?\s+(?:de|d['’])|pour(?=\s+(?:ne\s+(?:pas|plus)|éviter|limiter|permettre|faciliter|favoriser|prévenir|réduire|empêcher|assurer|maintenir|obtenir|améliorer|diminuer|garantir|préserver|protéger|s['’]assurer)\b)|car)(?=[\s'’]|$)/i;
+  const wordCount = (s) => (s.match(/[\p{L}\d]+/gu) || []).length;
+
+  /**
+   * Phrases d'un texte qui justifient un geste : [{ act: [début, fin], why: [début, fin], conn, purpose, lead }], positions
+   * dans `text`. act = ce qu'on fait, why = la raison (sans le mot de liaison) ; purpose : un but (« afin de »), pas une
+   * cause (« car ») ; lead : la raison vient en tête (« Afin de…, »). Une phrase par élément au plus, la première liaison.
+   */
+  function whyClauses(text) {
+    const t = String(text || '');
+    const out = [];
+    // fin de phrase : ; et : toujours, . ! ? si la suite commence par une majuscule, un chiffre ou s'arrête (« etc. » au
+    // milieu d'une phrase, « cf. » ne coupent pas)
+    const cuts = [0];
+    for (const m of t.matchAll(/[;:]|[.!?](?=\s*(?:$|[A-ZÀ-ÖØ-Þ0-9«•·]))/g)) cuts.push(m.index + 1);
+    cuts.push(t.length);
+    for (let k = 0; k + 1 < cuts.length; k++) {
+      let s0 = cuts[k];
+      let s1 = cuts[k + 1];
+      while (s0 < s1 && /[\s;:.!?]/.test(t[s0])) s0 += 1;
+      while (s1 > s0 && /[\s;:.!?,]/.test(t[s1 - 1])) s1 -= 1;
+      if (s1 - s0 < 12) continue;
+      const sent = t.slice(s0, s1);
+      const m = WHY_CONN.exec(sent);
+      if (!m) continue;
+      const c0 = s0 + m.index + m[1].length;
+      const c1 = c0 + m[2].length;
+      const conn = m[2].toLowerCase().replace(/\s+/g, ' ');
+      const skip = (a, b) => { while (a < b && /[\s,'’]/.test(t[a])) a += 1; while (b > a && /[\s,]/.test(t[b - 1])) b -= 1; return [a, b]; };
+      let act;
+      let why;
+      const lead = c0 - s0 <= 1;
+      if (lead) {
+        const comma = t.indexOf(',', c1);
+        if (comma < 0 || comma >= s1) continue;
+        why = skip(c1, comma);
+        act = skip(comma + 1, s1);
+      } else {
+        act = skip(s0, c0);
+        // « … afin que le courant ne soit pas dévié, il faut… » : la raison s'arrête avant la proposition principale
+        const main = /,\s+(?:il|on)\s/.exec(t.slice(c1, s1));
+        why = skip(c1, main ? c1 + main.index : s1);
+      }
+      const na = wordCount(t.slice(...act));
+      const nw = wordCount(t.slice(...why));
+      if (na < 2 || na > 35 || nw < 3 || nw > 45) continue;
+      out.push({ act, why, conn, purpose: conn !== 'car' && !/^ce qui/.test(conn), lead });
+    }
+    return out;
+  }
+
+  // ───────── page blanche : ce que le texte libre contient des éléments attendus ─────────
+  const foldKey = (s) => String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/œ/g, 'oe').replace(/æ/g, 'ae');
+  const STOP = new Set('les des une aux pour dans avec sans sur sous par est sont que qui quoi dont ses son sa leur leurs cette ces cet elle elles ils lui mais donc car pas plus tres bien tout tous toute toutes etre avoir fait faire peut doit entre vers chez lors afin ainsi meme comme puis'.split(' '));
+  const keyWords = (s) => foldKey(s).split(/[^a-z0-9]+/).filter((w) => w && (/\d/.test(w) || (w.length >= 3 && !STOP.has(w))));
+  const stem = (w) => (/\d/.test(w) ? w : w.slice(0, 5)); // « compressions » ≈ « compression », « placer » ≈ « placez »
+
+  /**
+   * Pour chaque élément attendu, l'a-t-on écrit ? Vrai si au moins 60 % de ses mots significatifs sont dans le texte
+   * (accents, pluriels, conjugaisons ignorés ; un nombre doit y être tel quel). Pré-coche seulement : on corrige à la main.
+   */
+  function recallHits(text, items) {
+    const have = new Set(keyWords(text).map(stem));
+    return (items || []).map((it) => {
+      const ks = [...new Set(keyWords(it).map(stem))];
+      if (!ks.length) return false;
+      const hit = ks.filter((k) => have.has(k)).length;
+      return hit / ks.length >= 0.6 && ks.filter((k) => /\d/.test(k)).every((k) => have.has(k));
+    });
+  }
+
+  // ───────── confiance annoncée avant la réponse ─────────
+  const CONF = Object.freeze({ s: 'Sûr', d: 'J’hésite', u: 'Je ne sais pas' });
+  /**
+   * Note retenue selon la confiance annoncée : une bonne réponse sans savoir (« je ne sais pas ») n'est pas acquise, au
+   * mieux « Difficile » ; en hésitant, pas « Facile ». Une confiance absente ne change rien.
+   */
+  const confGrade = (conf, g) => (conf === 'u' ? Math.min(g, 2) : conf === 'd' ? Math.min(g, 3) : g);
+
+  return { whyClauses, recallHits, CONF, confGrade, identifyingHints, diffText, diffWords, sameText, W, GRADES, GRADE_LABELS, NATURES, newState, review, preview, waitLabel, recall, isDue, retrievability, intervalFor, pace, cloze, hasCloze, codeOf, splitReferential, tocFiches, pdfPageMarkdown, pdfGrids, mdPlain, scoreCase, parseActions, actionsText, parseEvents, eventsText };
 });
