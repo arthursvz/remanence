@@ -270,3 +270,24 @@ body.has-tabs #toasts { bottom: calc(86px + env(safe-area-inset-bottom)); }
 .confb.c-s, .conf-said.c-s b { color: var(--amber); }
 .conf-said { margin: 0; padding: 0 16px 8px; font-size: 13px; color: var(--dim); }
 .grade.capped span { text-decoration: line-through; }
+
+/* cas concrets : en-tête collant, moniteur, onglets Scène / Agir / Bilan, fiche bilan */
+.ms-sticky { position: sticky; top: 0; z-index: 4; background: var(--bg); padding: 6px 0 4px; display: grid; gap: 6px; }
+.ms-mini { padding: 5px 10px; font-size: 13px; min-width: 40px; }
+.ms-tabs { display: flex; border: 1px solid var(--line-strong); border-radius: var(--r-sm); overflow: hidden; }
+.ms-tabs button { flex: 1; background: none; border: none; border-radius: 0; color: var(--muted); padding: 9px 4px; font-size: 14px; }
+.ms-tabs button + button { border-left: 1px solid var(--line-strong); }
+.ms-tabs button[aria-selected="true"] { background: var(--amber-soft); color: var(--amber); }
+.ms-moncard { display: flex; gap: 14px; justify-content: space-around; padding: 6px 10px; border-radius: var(--r-sm); background: #0b0f14; border: 1px solid var(--line-strong); font-size: 20px; font-weight: 600; }
+.ms-mv small { font-size: 11px; font-weight: 400; color: var(--muted); }
+.ms-mv.mv-spo2 { color: #6cc4f0; } .ms-mv.mv-fc { color: var(--ok); } .ms-mv.mv-pa { color: var(--amber); }
+.ms-mv.alarm { color: var(--err); }
+.ms-cmd { position: static; }
+.ms-last { display: grid; gap: 4px; }
+.ms-last:empty { display: none; }
+.ms-step { font-size: 11px; color: var(--amber); text-transform: uppercase; letter-spacing: .08em; padding-top: 4px; }
+.ms-fams-l { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; align-self: center; width: 52px; }
+.ms-sec-t { font-size: 11px; color: var(--amber); text-transform: uppercase; letter-spacing: .08em; }
+.ms-sec.ms-none { opacity: .55; }
+.ms-row { display: grid; gap: 1px; font-size: 14px; border-top: 1px solid var(--line); padding-top: 5px; }
+.ms-trend { color: var(--amber); font-size: 12.5px; }
