@@ -164,9 +164,35 @@ async function fetchEntry(lic, sKey) {
   const e = await X.openEntry(list, lic.id, sKey);
   if (!e) return { status: 'absent' };
   const keys = {};
-  for (const k of ['p1', 'p2', 'sim']) if (e.keys && e.keys[k]) keys[k] = await X.aesKey(e.keys[k]);
+  for (const k of ['p1', 'p2', 'sim', 'k', 'ok']) if (e.keys && e.keys[k]) keys[k] = await X.aesKey(e.keys[k]);
   const mod = { cards: !!(e.mod && e.mod.cards), sim: !!(e.mod && e.mod.sim), feed: !!(e.mod && e.mod.feed) };
-  return { status: 'ok', ent: { lid: lic.id, st: e.st, cur: e.cur === 'PSE1' ? 'PSE1' : 'PSE2', mod, keys, seq: list.seq, at: Date.now() } };
+  // exp : fin publiée par l'émetteur (prolongation sans nouveau lien) ; absente des listes d'avant
+  return { status: 'ok', ent: { lid: lic.id, st: e.st, cur: e.cur === 'PSE1' ? 'PSE1' : 'PSE2', mod, keys, exp: Number(e.exp) || null, seq: list.seq, at: Date.now() } };
+}
+
+/** Fin publiée dans licences.json : elle fait foi (prolongée ou raccourcie sans nouveau lien) ; clés du canal reprises. */
+async function adoptExpiry(ent) {
+  if (!ent || !ent.exp || !S.lic) return;
+  const rec = (await get('licence')) || { lic: S.lic };
+  const longer = ent.exp > S.lic.exp;
+  const changed = ent.exp !== S.lic.exp;
+  S.lic = { ...S.lic, exp: ent.exp };
+  const k = (S.keys && S.keys.k) || ent.keys.k || null;
+  const ok = (S.keys && S.keys.ok) || (S.lic.o ? ent.keys.ok || null : null);
+  S.keys = { ...(S.keys || {}), k, ok };
+  if (changed || !rec.k) await put('licence', { ...rec, lic: S.lic, k, ok, s: rec.s || (S.keys && S.keys.s) || null, expired: false });
+  if (longer) toast(`Licence prolongée jusqu’au ${fmtDate(ent.exp)} : ta progression est gardée.`);
+}
+
+/** Licence arrivée à expiration (ou clés effacées) : si l'émetteur l'a prolongée, on repart sans nouveau lien. */
+async function tryRenew() {
+  if (!navigator.onLine || !S.lic || !S.keys || !S.keys.s) return false;
+  const r = await fetchEntry(S.lic, S.keys.s);
+  if (r.status !== 'ok' || r.ent.st !== 'active' || !r.ent.exp || r.ent.exp <= Date.now() || !r.ent.keys.k) return false;
+  await put('entry', r.ent);
+  S.ent = r.ent;
+  await adoptExpiry(r.ent);
+  return true;
 }
 
 /** Licence révoquée : licence, paquets, cas concrets et progression effacés de l'appareil. */
@@ -191,6 +217,8 @@ async function accessGate(force = true) {
     if (r.ent.st === 'revoked') { await revokeHere(); return false; }
     await put('entry', r.ent);
     S.ent = r.ent;
+    await adoptExpiry(r.ent);
+    if (Date.now() > S.lic.exp) { await checkLicence(); return false; } // raccourcie par l'émetteur
     if (r.ent.st !== 'active') {
       S.error = 'Accès suspendu par l’émetteur de la licence. Tes données restent sur ce téléphone ; l’accès reviendra quand il le rétablira.';
       show('licence');
@@ -221,12 +249,13 @@ async function loadLicence() {
 /** Vérifie, puis range la licence : les clés et le secret deviennent des CryptoKey non extractables. */
 async function installLicence(token) {
   const lic = await X.parseLicence(token, CFG.pub);
-  if (Date.now() > lic.exp) throw new Error(`Cette licence a expiré le ${fmtDate(lic.exp)}.`);
   if (lic.v !== 2) throw new Error('Lien d’ancien format : demande un nouveau lien à son émetteur.');
   const keys = { k: await X.aesKey(lic.k), ok: lic.ok ? await X.aesKey(lic.ok) : null, s: await X.aesKey(lic.s) };
   const r = await fetchEntry(lic, keys.s);
   if (r.status === 'absent') throw new Error('Cette licence n’est pas encore activée sur le site : demande à son émetteur de publier les licences.');
   if (r.status === 'ok' && r.ent.st === 'revoked') throw new Error('Cette licence a été révoquée par son émetteur.');
+  if (r.status === 'ok' && r.ent.exp) lic.exp = r.ent.exp; // la fin publiée fait foi (prolongée depuis l'émission du lien)
+  if (Date.now() > lic.exp) throw new Error(`Cette licence a expiré le ${fmtDate(lic.exp)}.`);
   const { k, ok, s: _s, token: _t, ...pub } = lic;
   const prev = S.lic;
   const same = prev && samePerson(prev, pub);
@@ -260,10 +289,13 @@ async function checkLicence() {
     show('licence');
     return false;
   }
+  // expirée, ou clés effacées à une expiration passée : prolongée entre-temps par l'émetteur ?
+  if ((now > S.lic.exp || !S.keys || !S.keys.k) && (await tryRenew().catch(() => false))) return checkLicence();
   if (now > S.lic.exp) {
-    await put('licence', { lic: S.lic, k: null, ok: null, s: null, expired: true });
-    S.keys = { k: null, ok: null, s: null };
-    S.error = `La licence de ${S.lic.h} a expiré le ${fmtDate(S.lic.exp)}. Demande un nouveau lien ; ta progression est gardée.`;
+    // le secret de la licence est gardé : c'est lui qui permet de voir une prolongation publiée plus tard
+    await put('licence', { lic: S.lic, k: null, ok: null, s: (S.keys && S.keys.s) || null, expired: true });
+    S.keys = { k: null, ok: null, s: (S.keys && S.keys.s) || null };
+    S.error = `La licence de ${S.lic.h} a expiré le ${fmtDate(S.lic.exp)}. Demande à son émetteur de la prolonger : elle reprendra d’elle-même à la prochaine ouverture, avec ta progression.`;
     show('licence');
     return false;
   }
@@ -527,7 +559,8 @@ function licenceView() {
     S.error ? h('div', { class: 'callout err' }, S.error) : null,
     h('div', { class: 'card' }, h('div', { class: 'card-body stack' },
       h('h2', {}, S.lic && S.keys && S.keys.k ? 'Vérification de la licence' : S.lic ? 'Licence à renouveler' : 'Bienvenue'),
-      S.lic && S.keys && S.keys.k ? h('button', { class: 'secondary wide', id: 'lic-recheck', onclick: () => boot() }, 'Vérifier maintenant') : null,
+      // clés du canal présentes (vérification), ou seulement le secret (expirée : prolongée depuis ?)
+      S.lic && S.keys && (S.keys.k || S.keys.s) ? h('button', { class: 'secondary wide', id: 'lic-recheck', onclick: () => boot() }, S.keys.k ? 'Vérifier maintenant' : 'Vérifier si elle a été prolongée') : null,
       h('p', { class: 'muted small' }, 'Rémanence s’ouvre avec un lien de licence personnel, émis depuis Dawn. Ouvre le lien reçu, ou colle-le ci-dessous.'),
       ta, go)),
     h('div', { class: 'card' }, h('div', { class: 'card-body stack' },
@@ -681,6 +714,27 @@ setInterval(() => {
   if (S.lic && S.keys && S.keys.k && Date.now() > S.lic.exp && S.screen !== 'licence') { S.session = null; checkLicence(); }
 }, 15000);
 
+/** Signalements du fil : fichier à part (.remflag.pdf, faux PDF chiffré avec la clé du canal), importé dans Dawn. */
+async function exportFlags() {
+  try {
+    const flags = S.prog.flags || [];
+    if (!flags.length) { toast('Aucune tuile signalée.'); return; }
+    const header = { kind: 'flags', channel: S.lic.ch, licence: S.lic.id, holder: S.lic.h, owner: !!S.lic.o, exportedAt: new Date().toISOString(), flags: flags.length };
+    const bin = await X.sealProgress(S.keys.k, header, { flags });
+    const name = `remanence-signalements-${norm(S.lic.h).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'fil'}-${dayOf()}.remflag.pdf`;
+    const a = h('a', { href: URL.createObjectURL(new File([bin], name, { type: 'application/pdf' })), download: name });
+    document.body.append(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 4000);
+    S.prog.flagsExportedAt = Date.now();
+    await saveProg();
+    toast(`${plural(flags.length, 'tuile signalée')} exportée${flags.length > 1 ? 's' : ''} dans Téléchargements. Dans Dawn : Ozone › Paramètres › Rémanence › Importer des signalements.`);
+    render();
+  } catch (err) {
+    toast(`Export impossible : ${err.message}`, true);
+  }
+}
+
 function progressCard() {
   const last = S.prog.lastBackup ? fmtDate(S.prog.lastBackup) : 'jamais';
   return h('div', { class: 'card' },
@@ -693,7 +747,10 @@ function progressCard() {
       S.lic.o ? h('p', { class: 'muted small' }, 'Licence propriétaire : « Importer ma progression » accepte aussi le fichier exporté par Dawn sur ton PC (seules les révisions plus récentes sont reprises).') : null,
       h('button', { class: 'primary wide', id: 'prog-export', disabled: !S.keys || !S.keys.k || !S.prog.log.length, onclick: exportProgress }, 'Exporter ma progression'),
       navigator.canShare ? h('button', { class: 'link', id: 'prog-share', disabled: !S.keys || !S.keys.k || !S.prog.log.length, onclick: shareProgress }, 'Envoyer directement (Drive, mail…)') : null,
-      h('button', { class: 'secondary wide', id: 'prog-import', disabled: !S.keys || !S.keys.k, onclick: () => $('#file-progress').click() }, 'Importer ma progression')));
+      h('button', { class: 'secondary wide', id: 'prog-import', disabled: !S.keys || !S.keys.k, onclick: () => $('#file-progress').click() }, 'Importer ma progression'),
+      h('div', { class: 'flags-zone' },
+        h('p', { class: 'muted small' }, (S.prog.flags || []).length ? `${plural(S.prog.flags.length, 'tuile signalée')} dans le fil${S.prog.flagsExportedAt ? ` · dernier export le ${fmtDate(S.prog.flagsExportedAt)}` : ''}.` : 'Aucune tuile signalée dans le fil (drapeau ⚑ d’un écran).'),
+        h('button', { class: 'secondary wide', id: 'flags-export', disabled: !S.keys || !S.keys.k || !(S.prog.flags || []).length, onclick: exportFlags }, 'Exporter les tuiles signalées'))));
 }
 
 function licenceCard() {
@@ -718,7 +775,7 @@ function licenceCard() {
 /** Fichier de progression chiffré (clé du canal). */
 async function progressFile() {
   const header = { channel: S.lic.ch, licence: S.lic.id, holder: S.lic.h, owner: !!S.lic.o, exportedAt: new Date().toISOString(), reviews: S.prog.log.length };
-  const bin = await X.sealProgress(S.keys.k, header, { log: S.prog.log, seen: S.prog.seen, days: S.prog.days, cfg: S.prog.cfg, ...(S.lic.o ? { base: S.prog.base || {} } : {}) });
+  const bin = await X.sealProgress(S.keys.k, header, { log: S.prog.log, seen: S.prog.seen, days: S.prog.days, cfg: S.prog.cfg, flags: S.prog.flags || [], ...(S.lic.o ? { base: S.prog.base || {} } : {}) });
   const name = `remanence-${norm(S.lic.h).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'progression'}-${dayOf()}.remprog.pdf`;
   return new File([bin], name, { type: 'application/pdf' });
 }
@@ -770,6 +827,7 @@ $('#file-progress').addEventListener('change', async (e) => {
     const head = X.progressHeader(buf);
     if (head.channel !== S.lic.ch) throw new Error('Cette progression vient d’une autre clé de canal que ta licence.');
     if (head.kind === 'snapshot') return await importSnapshot(buf, head);
+    if (head.kind === 'flags') throw new Error('C’est un fichier de tuiles signalées : importe-le dans Dawn (Ozone › Paramètres › Rémanence › Importer des signalements).');
     if (head.holder !== S.lic.h && !confirm(`Cette progression est celle de « ${head.holder} », pas la tienne (« ${S.lic.h} »). La fusionner quand même ?`)) return;
     const { data } = await X.openProgress(buf, S.keys.k);
     const seen = new Set(S.prog.log.map((x) => `${x.c}|${x.at}`));

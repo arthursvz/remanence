@@ -393,3 +393,62 @@ body.feed-on .root { padding: 0; }
 .fd-over-head { display: flex; align-items: center; gap: 10px; padding: calc(10px + env(safe-area-inset-top)) 16px 10px; border-bottom: 1px solid var(--line); }
 .fd-over-title { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: baseline; font-size: 14px; overflow: hidden; }
 .fd-over-body { flex: 1; overflow-y: auto; padding: 12px 12px calc(16px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; gap: 12px; }
+
+/* contexte affiché avant la réponse : fiche, rubrique, public, phrase d'introduction */
+.fd-ctx { display: flex; flex-direction: column; gap: 6px; }
+.fd-ctx-f { display: flex; gap: 8px; align-items: baseline; font-size: 13.5px; }
+.fd-ctx-f b { font-weight: 600; }
+.fd-ctx-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.fd-tag { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--muted); background: var(--surface); }
+.fd-tag.pub { color: var(--amber); border-color: rgba(245, 165, 36, .4); background: var(--amber-soft); }
+.fd-ctx-lead { font-size: 14px; color: var(--muted); font-style: italic; border-left: 2px solid var(--line-strong); padding-left: 8px; }
+.fd-scene { font-size: 14.5px; color: var(--muted); }
+
+/* boutons de réponse : trois choix, état après réponse */
+.fd-vf-btns.three { grid-template-columns: repeat(3, 1fr); }
+.fd-vf-btns button.right { border-color: var(--ok); }
+.fd-vf-btns button.wrong { border-color: var(--err); }
+.fd-vf-btns button:disabled { opacity: 1; }
+.fd-nums { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.fd-nums button { padding: 16px 0; font-size: 22px; background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: var(--r); }
+.fd-nums button.right { border-color: var(--ok); color: var(--ok); }
+.fd-nums button.wrong { border-color: var(--err); color: var(--err); }
+.fd-nums button:disabled { opacity: 1; }
+
+/* constantes */
+.fd-vital { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 18px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; }
+.fd-vital-l { font-size: 14px; color: var(--muted); }
+.fd-vital-v { font-size: 38px; color: var(--text); }
+.fd-rows { display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: var(--r); background: var(--surface); }
+.fd-row { display: flex; justify-content: space-between; padding: 10px 14px; font-size: 15px; border-top: 1px solid var(--line); }
+.fd-row:first-child { border-top: none; }
+.fd-row .mono { font-size: 16px; }
+.fd-row.bad { color: var(--err); }
+
+/* sigle, listes */
+.fd-sigle { font-size: 44px; text-align: center; letter-spacing: .08em; color: var(--amber); padding: 6px 0; }
+.fd-seq { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--muted); }
+.fd-seq li.hl { color: var(--text); }
+
+/* fil : signaler une question bancale */
+.fd-kind-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.fd-flag { background: none; border: 1px solid transparent; color: var(--dim); font-size: 15px; padding: 2px 8px; border-radius: var(--r-sm); }
+.fd-flag.on { color: var(--amber); border-color: rgba(245, 165, 36, .35); }
+.fd-sheet { position: fixed; inset: 0; z-index: 30; background: rgba(5, 7, 10, .72); display: flex; align-items: flex-end; justify-content: center; }
+.fd-sheet-in { width: 100%; max-width: 560px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 14px 14px 0 0; padding: 16px 16px calc(16px + env(safe-area-inset-bottom)); }
+.fd-sheet .fd-opts button.right { border-color: var(--amber); color: var(--amber); }
+.fd-note { width: 100%; resize: none; background: var(--surface-2); color: var(--text); border: 1px solid var(--line-strong); border-radius: var(--r); padding: 8px 10px; font: 14px var(--sans); }
+
+/* mot qui manque, élément manquant, signe */
+.fd-word { min-width: 0; padding: 0 2px; letter-spacing: .12em; }
+.fd-word.shown, .fd-miss li.shown { color: var(--amber); letter-spacing: normal; }
+.fd-miss li.gap { color: var(--amber); list-style: none; margin-left: -18px; font-family: var(--mono); }
+.fd-sign { font-size: 19px; font-weight: 600; text-align: center; line-height: 1.4; }
+/* trois choix côte à côte : libellés longs (« Neurologique ») sans débordement */
+.fd-vf-btns.three button { padding: 12px 4px; font-size: 13.5px; min-width: 0; overflow-wrap: anywhere; }
+
+/* ce que voit le témoin, repère */
+.fd-said { font-size: 20px; line-height: 1.4; font-style: italic; padding: 14px 16px; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 12px; }
+.fd-mark-step { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-left: 2px solid var(--amber); background: var(--amber-soft); border-radius: 0 var(--r-sm) var(--r-sm) 0; }
+
+.flags-zone { display: grid; gap: 8px; border-top: 1px solid var(--line); padding-top: 12px; margin-top: 2px; }
