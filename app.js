@@ -165,7 +165,7 @@ async function fetchEntry(lic, sKey) {
   if (!e) return { status: 'absent' };
   const keys = {};
   for (const k of ['p1', 'p2', 'sim']) if (e.keys && e.keys[k]) keys[k] = await X.aesKey(e.keys[k]);
-  const mod = { cards: !!(e.mod && e.mod.cards), sim: !!(e.mod && e.mod.sim) };
+  const mod = { cards: !!(e.mod && e.mod.cards), sim: !!(e.mod && e.mod.sim), feed: !!(e.mod && e.mod.feed) };
   return { status: 'ok', ent: { lid: lic.id, st: e.st, cur: e.cur === 'PSE1' ? 'PSE1' : 'PSE2', mod, keys, seq: list.seq, at: Date.now() } };
 }
 
@@ -278,11 +278,12 @@ async function checkLicence() {
 
 /** Contenus selon les droits : cartes (pack.bin, pack2.bin si PSE2) et cas concrets (sim.bin). */
 async function openContent() {
-  if (S.ent.mod.cards) await loadPack();
+  if (S.ent.mod.cards || S.ent.mod.feed) await loadPack();
   else { S.pack = null; S.data = { doc: null, fiches: [], cards: [], base: {} }; rebuildSrs(); }
   if (S.ent.mod.sim) await loadSim().catch((err) => toast(`Cas concrets indisponibles : ${err.message}`, true));
-  if (S.tab === 'review' && !S.ent.mod.cards) S.tab = 'sim';
-  if (S.tab === 'sim' && !S.ent.mod.sim) S.tab = 'review';
+  // onglet ouvert : le premier permis (Réviser, Fil, Cas concrets)
+  const allowed = (t) => (t === 'review' ? S.ent.mod.cards : t === 'feed' ? S.ent.mod.feed : t === 'sim' ? S.ent.mod.sim : true);
+  if (!allowed(S.tab)) S.tab = ['review', 'feed', 'sim'].find(allowed) || 'account';
 }
 
 async function loadPack() {
@@ -406,7 +407,7 @@ async function checkUpdate(manual) {
         else await loadSim(meta).catch(() => {});
       }
     }
-    if (!S.ent.mod.cards) { if (manual) toast('Déjà à jour.'); return; }
+    if (!S.ent.mod.cards && !S.ent.mod.feed) { if (manual) toast('Déjà à jour.'); return; }
     if (S.pack && meta.packId === S.pack.packId) { if (manual) toast('Déjà à jour.'); return; }
     if (meta.channel !== S.lic.ch) { toast('Une nouvelle version existe, mais elle demande un nouveau lien de licence.', true); return; }
     if (S.session) return; // pas en pleine séance
@@ -477,19 +478,20 @@ function show(screen) {
 function render() {
   const root = $('#root');
   const cur = $('#cursus');
-  cur.hidden = !(S.data && S.ent && S.ent.mod.cards && S.ent.cur === 'PSE2' && ['home', 'session', 'free'].includes(S.screen));
+  cur.hidden = !(S.data && S.ent && (S.ent.mod.cards || S.ent.mod.feed) && S.ent.cur === 'PSE2' && ['home', 'session', 'free'].includes(S.screen) && !(S.screen === 'home' && ['sim', 'account'].includes(S.tab)));
   for (const b of cur.querySelectorAll('button')) b.setAttribute('aria-pressed', String(S.prog && b.dataset.cursus === cfg().cursus));
   $('#bar-sub').textContent = S.lic ? S.lic.h : 'référentiel PSE';
   const tabs = !!(S.data && S.screen === 'home');
   $('#tabs').hidden = !tabs;
   document.body.classList.toggle('has-tabs', tabs);
+  document.body.classList.toggle('feed-on', S.screen === 'home' && S.tab === 'feed' && !!S.data);
   for (const b of document.querySelectorAll('#tabs button')) {
     b.setAttribute('aria-selected', String(b.dataset.tab === S.tab));
-    b.hidden = !!S.ent && ((b.dataset.tab === 'review' && !S.ent.mod.cards) || (b.dataset.tab === 'sim' && !S.ent.mod.sim));
+    b.hidden = !!S.ent && ((b.dataset.tab === 'review' && !S.ent.mod.cards) || (b.dataset.tab === 'sim' && !S.ent.mod.sim) || (b.dataset.tab === 'feed' && !S.ent.mod.feed));
   }
   $('#tab-dot').hidden = !(tabs && needsBackup());
   const view = S.screen === 'licence' ? licenceView() : S.screen === 'busy' ? busyView() : S.screen === 'session' && S.session ? sessionView() : S.screen === 'free' && S.data ? freeView()
-    : S.screen === 'home' && S.data ? (S.tab === 'account' ? accountView() : S.tab === 'sim' && S.ent && S.ent.mod.sim ? (typeof simView === 'function' ? simView() : h('p', { class: 'muted' }, 'Chargement des cas concrets…')) : homeView()) : S.screen === 'boot' ? h('p', { class: 'muted' }, 'Ouverture…') : licenceView();
+    : S.screen === 'home' && S.data ? (S.tab === 'account' ? accountView() : S.tab === 'feed' && S.ent && S.ent.mod.feed ? (typeof feedView === 'function' ? feedView() : h('p', { class: 'muted' }, 'Fil indisponible : réexporte le site depuis Dawn.')) : S.tab === 'sim' && S.ent && S.ent.mod.sim ? (typeof simView === 'function' ? simView() : h('p', { class: 'muted' }, 'Chargement des cas concrets…')) : homeView()) : S.screen === 'boot' ? h('p', { class: 'muted' }, 'Ouverture…') : licenceView();
   root.replaceChildren(view);
   if (S.screen === 'home' && !INST.offered) {
     INST.offered = true;
@@ -702,7 +704,7 @@ function licenceCard() {
       h('dl', { class: 'kv' },
         h('dt', {}, 'Titulaire'), h('dd', {}, S.lic.h + (S.lic.o ? ' · propriétaire' : '')),
         h('dt', {}, 'Valable jusqu’au'), h('dd', {}, fmtDateTime(S.lic.exp)),
-        h('dt', {}, 'Accès'), h('dd', {}, S.ent ? [S.ent.mod.cards ? `cartes ${S.ent.cur}` : '', S.ent.mod.sim ? 'cas concrets' : ''].filter(Boolean).join(' + ') : '—'),
+        h('dt', {}, 'Accès'), h('dd', {}, S.ent ? [S.ent.mod.cards ? `cartes ${S.ent.cur}` : '', S.ent.mod.sim ? 'cas concrets' : '', S.ent.mod.feed ? 'fil' : ''].filter(Boolean).join(' + ') : '—'),
         h('dt', {}, 'Vérifiée'), h('dd', {}, S.ent ? fmtDateTime(S.ent.at) : '—'),
         h('dt', {}, 'Paquet'), h('dd', {}, S.pack ? `${fmtDate(Date.parse(S.pack.createdAt))} · ${S.data.cards.length} cartes` : '—'),
         h('dt', {}, 'Référentiel'), h('dd', {}, S.data.doc ? `${S.data.doc.name} · ${S.data.doc.pages} p.` : '—')),
