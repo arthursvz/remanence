@@ -113,16 +113,32 @@
   // ── découpage du référentiel ──
   const NATURES = Object.freeze({ AC: 'Apport de connaissances', PR: 'Procédure', FT: 'Fiche technique', X: 'Autre' });
   // en-tête du référentiel national : « [01AC04 / 11-2021] PSE① », « [06FT03 / 11/2021] PSE①② », « [04FT11 / 12-2022] »
-  const CODE_H = /^\[\s*(\d{2})\s?(AC|PR|FT)\s?(\d{2})\s*(?:\/\s*(\d{1,2})\s*[-/.]\s*(\d{4}))?\s*\]\s*(PSE\s*[①②12\s]*)?\s*(.*)$/i;
+  const CODE_H = /^\[\s*(\d{2})\s?(AC|PR|FT)\s?(\d{2})\s*(?:\/\s*(\d{1,2})\s*[-/.]\s*(\d{4}))?\s*\]\s*(PS[EC]\s*[①②12\s]*)?\s*(.*)$/i;
   // « PR 03 A 01 », « PR03A01 », « Fiche FT 05 B 02 – Titre » ; ou la forme « 03PR01 »
   const CODE_A = /^\s*(?:fiche\s+)?(AC|PR|FT)\s?(\d{1,2})\s?([A-Z])\s?(\d{1,2})\b\s*[-–—:.]?\s*(.*)$/i;
   const CODE_B = /^\s*(?:fiche\s+)?(\d{2})\s?(AC|PR|FT)\s?(\d{2})\b\s*[-–—:.]?\s*(.*)$/i;
   const TOC_LINE = /(\.\s?){4,}\s*\d+\s*$|_{3,}\s*\d+\s*$|\s{3,}\d+\s*$/;
   const pad = (n) => String(n).padStart(2, '0');
 
-  /** PSE① → PSE1, PSE② → PSE2, PSE①② → PSE1 (socle commun), sans marque → ''. */
+  /**
+   * Cursus choisis pour réviser, du plus petit au plus grand : PSC (référentiel Premiers secours citoyen, PDF à part),
+   * PSE1 (socle PSE seulement), PSE2 (PSE1 et PSE2). Une fiche ou une carte porte PSC, PSE1 ou PSE2.
+   */
+  const CURSUS = Object.freeze(['PSC', 'PSE1', 'PSE2']);
+  /** Référentiel (PDF) d'un cursus : PSC a le sien, PSE1 et PSE2 partagent celui du PSE. */
+  const refOf = (cursus) => (cursus === 'PSC' ? 'PSC' : 'PSE');
+  /** L'élément (cursus de la fiche, de la carte, du cas) fait-il partie du cursus choisi ? */
+  const inCursus = (cur, x) => (cur === 'PSC' ? x === 'PSC' : cur === 'PSE1' ? x === 'PSE1' || !x : x !== 'PSC');
+  /**
+   * Cursus qu'ouvre une licence : PSC et PSE sont sans lien. PSC → PSC seul ; PSE1 → PSE1 seul ; PSE2 → PSE1 ou PSE2
+   * (comme avant le PSC) ; jamais l'un avec l'autre.
+   */
+  const licenceCursus = (cur) => (cur === 'PSC' ? ['PSC'] : cur === 'PSE1' ? ['PSE1'] : ['PSE1', 'PSE2']);
+
+  /** PSE① → PSE1, PSE② → PSE2, PSE①② → PSE1 (socle commun), PSC① → PSC (référentiel Premiers secours citoyen), sans marque → ''. */
   function cursusOf(mark) {
     const m = String(mark || '');
+    if (/PSC/i.test(m)) return 'PSC';
     if (/[①1]/.test(m)) return 'PSE1';
     if (/[②2]/.test(m)) return 'PSE2';
     return '';
@@ -446,7 +462,7 @@
 
   // ── découpage par le sommaire (pages affichées telles quelles) ──
   // « [03AC01 / 09-2014] PSE① Accident d’exposition ______ 43 » ; chapitre : « - HYGIENE ET ASEPSIE ______ 42 »
-  const TOC_FICHE = /^\[\s*(\d{2})\s?(AC|PR|FT)\s?(\d{2})\s*(?:\/\s*(\d{1,2})\s*[-/.]\s*(\d{4}))?\s*\]\s*(PSE\s*[①②12\s]*)?\s*(.*?)\s*(?:_{2,}|(?:\.\s?){4,}|…+)\s*(\d{1,4})\s*$/i;
+  const TOC_FICHE = /^\[\s*(\d{2})\s?(AC|PR|FT)\s?(\d{2})\s*(?:\/\s*(\d{1,2})\s*[-/.]\s*(\d{4}))?\s*\]\s*(PS[EC]\s*[①②12\s]*)?\s*(.*?)\s*(?:_{2,}|(?:\.\s?){4,}|…+)\s*(\d{1,4})\s*$/i;
   const TOC_CHAP = /^[-–]\s+(.+?)\s*(?:_{2,}|(?:\.\s?){4,}|…+)\s*(\d{1,4})\s*$/;
   const capFirst = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : '');
 
@@ -730,5 +746,5 @@
    */
   const confGrade = (conf, g) => (conf === 'u' ? Math.min(g, 2) : conf === 'd' ? Math.min(g, 3) : g);
 
-  return { whyClauses, recallHits, CONF, confGrade, identifyingHints, diffText, diffWords, sameText, W, GRADES, GRADE_LABELS, NATURES, newState, review, preview, waitLabel, recall, isDue, retrievability, intervalFor, pace, cloze, hasCloze, codeOf, splitReferential, tocFiches, pdfPageMarkdown, pdfGrids, mdPlain, scoreCase, parseActions, actionsText, parseEvents, eventsText };
+  return { CURSUS, refOf, inCursus, licenceCursus, whyClauses, recallHits, CONF, confGrade, identifyingHints, diffText, diffWords, sameText, W, GRADES, GRADE_LABELS, NATURES, newState, review, preview, waitLabel, recall, isDue, retrievability, intervalFor, pace, cloze, hasCloze, codeOf, splitReferential, tocFiches, pdfPageMarkdown, pdfGrids, mdPlain, scoreCase, parseActions, actionsText, parseEvents, eventsText };
 });

@@ -275,6 +275,69 @@ const FDX = (() => {
     }
     return out;
   }
+  /**
+   * Leurres d'un sigle, aux MÊMES initiales que la vraie signification (sinon les initiales donnent la réponse) :
+   * un seul mot plein changé (deux, le leurre se repère trop vite) pour un mot du référentiel de même première lettre et
+   * de même terminaison (l'accord reste juste : « latérale » ↔ « locale »). `vocab` : [mots des autres sigles, mots courants
+   * du texte] ; seul le premier relâche la terminaison. `real` : vraies formes, jamais proposées comme leurre.
+   */
+  function sigleVocab(fulls, segs) {
+    const pick = (t) => (t.match(/[a-zà-ÿ]{4,}/gi) || []).filter((w) => w === w.toLowerCase() || w.slice(1) === w.slice(1).toLowerCase()).map((w) => w.toLowerCase());
+    const freq = new Map();
+    for (const s of segs) for (const w of pick(s)) freq.set(w, (freq.get(w) || 0) + 1);
+    // mots courants du référentiel, pas les formes conjuguées (« arrêtent », « décède ») ni les bribes
+    const text = [...freq].filter(([w, n]) => n >= 4 && w.length >= 5 && !/(ent|ez|ons|èd?e|ait|aient)$/.test(w)).map(([w]) => w);
+    return [[...new Set(fulls.flatMap(pick))], text];
+  }
+  function fakeFull(full, vocab, real = [], n = 2, rnd = Math.random) {
+    const key = (w) => w.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase();
+    const seen = new Set([...real, full].map((x) => key(x).replace(/\s+/g, ' ')));
+    const ws = full.split(/\s+/);
+    const parts = ws.map((w) => /^((?:[ldLD]['’])?)(.*)$/.exec(w));
+    const slots = parts.map((m, k) => (m[2].length >= 3 && !SMALL.has(m[2].toLowerCase()) && /^[A-Za-zÀ-ÿ-]+$/.test(m[2]) ? k : -1)).filter((k) => k >= 0);
+    if (slots.length < 2) return []; // un seul mot (« Mercure ») : rien à deviner
+    const pools = vocab.map((v) => [...new Set(v.map((x) => x.toLowerCase()))]);
+    // remplaçants possibles d'un mot, du plus sûr au moins sûr (même terminaison d'abord : l'accord reste juste)
+    const swaps = (w, end) => {
+      const lw = w.toLowerCase();
+      for (const [p, pool] of pools.entries()) {
+        const e = p ? Math.max(end, 3) : end;
+        const c = pool.filter((x) => key(x)[0] === key(lw)[0] && (!e || x.slice(-e) === lw.slice(-e)) && Math.abs(x.length - lw.length) <= 4 && key(x) !== key(lw));
+        if (c.length) return shuffle(c, rnd).map((r) => (w[0] === w[0].toUpperCase() ? r[0].toUpperCase() + r.slice(1) : r));
+      }
+      return [];
+    };
+    const out = [];
+    const used = new Set();
+    for (const end of [2, 1, 0]) {
+      for (const k of shuffle(slots, rnd)) {
+        if (out.length >= n) return out;
+        if (used.has(k)) continue;
+        // un leurre par mot changé quand c'est possible : deux leurres sur le même mot se trahissent
+        for (const r of swaps(parts[k][2], end)) {
+          const got = parts.map((m) => m[1] + m[2]);
+          got[k] = parts[k][1] + r;
+          const txt = got.join(' ');
+          if (seen.has(key(txt))) continue;
+          seen.add(key(txt));
+          out.push(txt);
+          used.add(k);
+          break;
+        }
+      }
+    }
+    // pas assez de mots différents : un deuxième leurre sur un mot déjà changé
+    for (const k of shuffle(slots, rnd)) {
+      for (const r of [2, 1, 0].flatMap((e) => swaps(parts[k][2], e))) {
+        if (out.length >= n) return out;
+        const got = parts.map((m) => m[1] + m[2]);
+        got[k] = parts[k][1] + r;
+        const txt = got.join(' ');
+        if (!seen.has(key(txt))) { seen.add(key(txt)); out.push(txt); }
+      }
+    }
+    return out;
+  }
 
   /**
    * « Pour qui ? » : phrases d'un seul public (adulte, enfant ou nourrisson), nommé dans la phrase, son intertitre ou
@@ -424,7 +487,7 @@ const FDX = (() => {
 
   const shuffle = (a, rnd = Math.random) => { const x = a.slice(); for (let k = x.length - 1; k > 0; k--) { const j = Math.floor(rnd() * (k + 1)); [x[k], x[j]] = [x[j], x[k]]; } return x; };
 
-  return { values, alter, slider, valueText, lines, blocks, segments, sentences, items, publics, hidePublic, valued, bpm, shuffle, normQuiz, urgentQuiz, abbrevs, defs, publicItems, distressQuiz, calcQuiz, keyWord, cutSentence, flipAbsolute, NORMS, GRAVITY, DISTRESS, SEQUENCES, WITNESS, HEADER };
+  return { values, alter, slider, valueText, lines, blocks, segments, sentences, items, publics, hidePublic, valued, bpm, shuffle, normQuiz, urgentQuiz, abbrevs, defs, sigleVocab, fakeFull, publicItems, distressQuiz, calcQuiz, keyWord, cutSentence, flipAbsolute, NORMS, GRAVITY, DISTRESS, SEQUENCES, WITNESS, HEADER };
 })();
 if (typeof module !== 'undefined' && module.exports) module.exports = FDX;
 
@@ -977,9 +1040,18 @@ async function fdSigle() {
   for (const [id, t] of FD.text) { if (sg.seen.has(id)) continue; sg.seen.add(id); const f = fiche(id); if (f && inCursus(f)) for (const d of FDX.defs(t.segs.join(' '))) if (!sg.list.has(d.abbr)) sg.list.set(d.abbr, { ...d, f }); }
   const all = [...sg.list.values()];
   if (all.length < 4) return null;
-  const a = fdPick(all);
-  const others = FDX.shuffle(all.filter((x) => x.full.toLowerCase() !== a.full.toLowerCase() && x.abbr !== a.abbr)).slice(0, 2);
-  const opts = FDX.shuffle([a, ...others]);
+  // leurres aux mêmes initiales (un mot changé) : avec d'autres sigles au hasard, les initiales donnaient la réponse
+  if (!sg.vocab || sg.vocabN !== FD.text.size) {
+    sg.vocab = FDX.sigleVocab(all.map((x) => x.full), [...FD.text.values()].flatMap((t) => t.segs));
+    sg.vocabN = FD.text.size;
+  }
+  const real = all.map((x) => x.full);
+  const cands = FDX.shuffle(all);
+  let a = null;
+  let fakes = [];
+  for (const x of cands.slice(0, 12)) { fakes = FDX.fakeFull(x.full, sg.vocab, real, 2); if (fakes.length === 2) { a = x; break; } }
+  if (!a) return null;
+  const opts = FDX.shuffle([a, ...fakes.map((full) => ({ abbr: '', full }))]);
   const out = h('div', { class: 'fd-out' });
   let done = false;
   const choose = (x, b) => {
@@ -1342,13 +1414,18 @@ async function fdMake() {
   return null;
 }
 
-/** Garde toujours quelques écrans d'avance ; retire les plus anciens au-delà de 30. */
+/**
+ * Garde toujours quelques écrans d'avance ; vide les écrans loin derrière.
+ * On ne retire jamais un écran et on ne touche jamais à scrollTop pendant le geste : recaler la position
+ * en plein défilement aimanté cassait l'arrêt écran par écran (le fil filait des dizaines d'écrans d'un coup).
+ * Un écran vidé garde sa hauteur : la position ne bouge pas.
+ */
 function fdFill(ahead = 3) {
   if (FD.busy) return FD.busy;
   FD.busy = (async () => {
     const list = FD.list;
     while (list && list.isConnected) {
-      const slides = [...list.children];
+      const slides = list.children;
       const cur = Math.round(list.scrollTop / Math.max(1, list.clientHeight));
       if (slides.length - 1 - cur >= ahead) break;
       const s = await fdMake();
@@ -1356,11 +1433,17 @@ function fdFill(ahead = 3) {
       list.append(s);
       FD.obs.observe(s);
     }
-    if (list && list.children.length > 30) {
-      const drop = list.children.length - 30;
-      const hgt = list.clientHeight;
-      for (let k = 0; k < drop; k++) { FD.obs.unobserve(list.firstElementChild); list.firstElementChild.remove(); }
-      list.scrollTop -= drop * hgt;
+    if (list && list.clientHeight) {
+      const cur = Math.round(list.scrollTop / list.clientHeight);
+      for (; FD.gone < cur - 12; FD.gone++) {
+        const s = list.children[FD.gone];
+        if (!s) break;
+        FD.obs.unobserve(s);
+        if (s.fdHide) s.fdHide();
+        s.fdShow = s.fdHide = null;
+        s.replaceChildren();
+        s.className = 'fd-slide fd-gone';
+      }
     }
   })().finally(() => { FD.busy = null; });
   return FD.busy;
@@ -1375,6 +1458,7 @@ function feedView() {
   }
   FD.cursus = cfg().cursus;
   FD.recent = [];
+  FD.gone = 1;
   FD.chip = h('div', { class: 'fd-chip mono' });
   fdChip();
   FD.list = h('div', { class: 'fd-list' },

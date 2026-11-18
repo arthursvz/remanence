@@ -3,7 +3,9 @@
 /*
  * Rémanence mobile : révision du référentiel PSE sur téléphone (page installable, hors ligne).
  *   licence   lien <site>#lic=… émis par Ozone ; signature vérifiée avec la clé publique de la licence Dawn (config.js)
- *   paquet    pack.bin chiffré (PDF, fiches, cartes), gardé chiffré dans IndexedDB ; mis à jour d'après pack.json
+ *   paquet    pack.bin chiffré (PDF, fiches, cartes), gardé chiffré dans IndexedDB ; mis à jour d'après pack.json ;
+ *             packc.bin : le référentiel PSC (son PDF, ses fiches, ses cartes), pour une licence PSC seulement ;
+ *             une licence PSE1 ou PSE2 ne le reçoit pas (PSC et PSE sans lien) : pour elle, rien ne change
  *   progression  propre à chaque personne et à cet appareil : journal des réponses { c, at, g, r } → état FSRS rejoué.
  *             Propriétaire : rejoué par-dessus le planning de Dawn contenu dans le paquet.
  *   accès     licences.json (signé par l'éditeur) lu à chaque ouverture : la ligne de CETTE licence (chiffrée avec son secret)
@@ -103,9 +105,19 @@ function cfg() {
   const c = (S.prog && S.prog.cfg) || {};
   return {
     exam: c.exam || '', newPerDay: Number(c.newPerDay) || 15, maxPerDay: Number(c.maxPerDay) || 200,
-    retention: Number(c.retention) || 0.9, cursus: c.cursus === 'PSE1' || (S.ent && S.ent.cur === 'PSE1') ? 'PSE1' : 'PSE2', typed: !!c.typed,
+    retention: Number(c.retention) || 0.9, cursus: pickCursus(c.cursus), typed: !!c.typed,
     confidence: c.confidence !== false, // confiance annoncée avant la réponse (Sûr, J'hésite, Je ne sais pas)
   };
+}
+/** Cursus permis par la licence : PSC seul, PSE1 seul, ou PSE1 / PSE2 (PSC et PSE sans lien). */
+function cursusChoices() {
+  return R.licenceCursus(S.ent ? S.ent.cur : 'PSE2');
+}
+/** Cursus choisi s'il est permis, sinon celui de la licence (comme avant : PSE2, ou PSE1 pour une licence PSE1). */
+function pickCursus(want) {
+  const ok = cursusChoices();
+  const max = S.ent ? S.ent.cur : 'PSE2';
+  return ok.includes(want) ? want : ok.includes(max) ? max : ok[ok.length - 1] || max;
 }
 /** La carte attend la confiance : réglage actif, rien choisi, réponse cachée (un dialogue commencé ne la redemande pas). */
 function askConf(s, card) {
@@ -164,10 +176,10 @@ async function fetchEntry(lic, sKey) {
   const e = await X.openEntry(list, lic.id, sKey);
   if (!e) return { status: 'absent' };
   const keys = {};
-  for (const k of ['p1', 'p2', 'sim', 'k', 'ok']) if (e.keys && e.keys[k]) keys[k] = await X.aesKey(e.keys[k]);
+  for (const k of ['p1', 'p2', 'pc', 'sim', 'k', 'ok']) if (e.keys && e.keys[k]) keys[k] = await X.aesKey(e.keys[k]);
   const mod = { cards: !!(e.mod && e.mod.cards), sim: !!(e.mod && e.mod.sim), feed: !!(e.mod && e.mod.feed) };
   // exp : fin publiée par l'émetteur (prolongation sans nouveau lien) ; absente des listes d'avant
-  return { status: 'ok', ent: { lid: lic.id, st: e.st, cur: e.cur === 'PSE1' ? 'PSE1' : 'PSE2', mod, keys, exp: Number(e.exp) || null, seq: list.seq, at: Date.now() } };
+  return { status: 'ok', ent: { lid: lic.id, st: e.st, cur: e.cur === 'PSE1' || e.cur === 'PSC' ? e.cur : 'PSE2', mod, keys, exp: Number(e.exp) || null, seq: list.seq, at: Date.now() } };
 }
 
 /** Fin publiée dans licences.json : elle fait foi (prolongée ou raccourcie sans nouveau lien) ; clés du canal reprises. */
@@ -199,8 +211,9 @@ async function tryRenew() {
 async function revokeHere() {
   const who = S.lic ? S.lic.h : '';
   if (S.lic) await del(progKey()).catch(() => {});
-  for (const k of ['licence', 'pack', 'pack2', 'simbin', 'entry']) await del(k).catch(() => {});
-  Object.assign(S, { lic: null, keys: null, ent: null, pack: null, data: null, prog: null, pdf: null, session: null });
+  for (const k of ['licence', 'pack', 'pack2', 'packc', 'simbin', 'entry']) await del(k).catch(() => {});
+  closePdfs();
+  Object.assign(S, { lic: null, keys: null, ent: null, pack: null, data: null, prog: null, session: null });
   S.srs = new Map();
   S.error = `La licence${who ? ` de ${who}` : ''} a été révoquée par son émetteur : licence, paquet et progression ont été effacés de ce téléphone.`;
   show('licence');
@@ -308,10 +321,10 @@ async function checkLicence() {
   return true;
 }
 
-/** Contenus selon les droits : cartes (pack.bin, pack2.bin si PSE2) et cas concrets (sim.bin). */
+/** Contenus selon les droits : cartes (pack.bin, pack2.bin si PSE2, packc.bin pour le PSC) et cas concrets (sim.bin). */
 async function openContent() {
   if (S.ent.mod.cards || S.ent.mod.feed) await loadPack();
-  else { S.pack = null; S.data = { doc: null, fiches: [], cards: [], base: {} }; rebuildSrs(); }
+  else { S.pack = null; S.data = { doc: null, fiches: [], cards: [], base: {}, refs: {} }; rebuildSrs(); }
   if (S.ent.mod.sim) await loadSim().catch((err) => toast(`Cas concrets indisponibles : ${err.message}`, true));
   // onglet ouvert : le premier permis (Réviser, Fil, Cas concrets)
   const allowed = (t) => (t === 'review' ? S.ent.mod.cards : t === 'feed' ? S.ent.mod.feed : t === 'sim' ? S.ent.mod.sim : true);
@@ -319,30 +332,55 @@ async function openContent() {
 }
 
 async function loadPack() {
-  const rec = await get('pack');
-  const rec2 = S.ent.keys.p2 ? await get('pack2') : null;
-  if (!rec || rec.header.channel !== S.lic.ch || (S.ent.keys.p2 && (!rec2 || rec2.header.packId !== rec.header.packId))) return downloadPack();
+  const k = S.ent.keys;
+  const rec = k.p1 ? await get('pack') : null;
+  const rec2 = k.p2 ? await get('pack2') : null;
+  const recc = k.pc ? await get('packc') : null;
+  const main = rec || recc;
+  // un paquet manque ou n'est pas du même envoi (même packId pour tous) : on retélécharge
+  const stale = !main || main.header.channel !== S.lic.ch || (k.p1 && !rec) || (k.p2 && (!rec2 || rec2.header.packId !== main.header.packId)) || (recc && recc.header.packId !== main.header.packId);
+  if (stale) return downloadPack();
   try {
-    await openPack(rec.buf, rec2 && rec2.buf);
+    await openPack({ pack: rec && rec.buf, pack2: rec2 && rec2.buf, packc: recc && recc.buf });
   } catch {
     await downloadPack(); // clés tournées depuis : le paquet gardé ne s'ouvre plus
   }
 }
 
-async function openPack(buf, buf2) {
-  if (!S.ent.keys.p1) throw new Error('Pas d’accès aux cartes avec cette licence.');
-  const { header, data, pdf } = await X.openPack(buf, S.ent.keys.p1);
-  let cards = data.cards;
-  if (S.ent.keys.p2 && buf2) cards = cards.concat((await X.openPack(buf2, S.ent.keys.p2)).data.cards);
-  let base = {};
-  if (S.lic.o && S.keys.ok && data.owner) {
-    try { base = (await X.openOwner(data.owner, S.keys.ok, header.packId)).srs || {}; } catch { base = {}; }
+/** bufs = { pack, pack2, packc } : paquets permis par la licence ; données réunies, un PDF par référentiel. */
+async function openPack(bufs) {
+  const k = S.ent.keys;
+  if (!k.p1 && !k.pc) throw new Error('Pas d’accès aux cartes avec cette licence.');
+  let header = null;
+  const fiches = [];
+  const cards = [];
+  const base = {};
+  const refs = {};
+  const owner = async (data, h, part) => {
+    if (!(S.lic.o && S.keys.ok && data.owner)) return;
+    try { Object.assign(base, (await X.openOwner(data.owner, S.keys.ok, part ? `${h.packId}|${part}` : h.packId)).srs || {}); } catch { /* planning illisible : départ à zéro */ }
+  };
+  if (k.p1 && bufs.pack) {
+    const o = await X.openPack(bufs.pack, k.p1);
+    header = o.header;
+    fiches.push(...o.data.fiches);
+    cards.push(...o.data.cards);
+    if (o.data.doc) refs.PSE = { doc: o.data.doc, pdf: o.pdf };
+    await owner(o.data, o.header, 0);
+    if (k.p2 && bufs.pack2) cards.push(...(await X.openPack(bufs.pack2, k.p2)).data.cards);
   }
+  if (k.pc && bufs.packc) {
+    const o = await X.openPack(bufs.packc, k.pc);
+    header = header || o.header;
+    fiches.push(...o.data.fiches);
+    cards.push(...o.data.cards);
+    if (o.data.doc) refs.PSC = { doc: o.data.doc, pdf: o.pdf };
+    await owner(o.data, o.header, 3);
+  }
+  if (!header) throw new Error('Paquet du référentiel absent.');
   S.pack = header;
-  S.data = { ...data, cards, base };
-  if (S.pdf) S.pdf.destroy();
-  S.pdf = null;
-  S.pdfBytes = pdf;
+  S.data = { doc: (refs.PSE || refs.PSC || {}).doc || null, fiches, cards, base, refs };
+  closePdfs();
   pageCache.clear();
   textCache.clear();
   rebuildSrs();
@@ -377,22 +415,28 @@ async function downloadPack(meta) {
   S.busy = 'Téléchargement du paquet…';
   show('busy');
   try {
-    const buf = await fetchBin('pack.bin', meta, meta && meta.size);
-    const buf2 = S.ent.keys.p2 ? await fetchBin('pack2.bin', meta, meta && meta.size2) : null;
-    await installPack(buf, buf2);
+    const k = S.ent.keys;
+    const buf = k.p1 ? await fetchBin('pack.bin', meta, meta && meta.size) : null;
+    const buf2 = k.p2 ? await fetchBin('pack2.bin', meta, meta && meta.size2) : null;
+    // packc.bin : annoncé par pack.json ; sans pack.json sous la main, un site d'avant le PSC n'en a pas (sans erreur)
+    const bufc = k.pc && (!meta || meta.sizeC) ? await fetchBin('packc.bin', meta, meta && meta.sizeC).catch((err) => { if (meta) throw err; return null; }) : null;
+    await installPack({ pack: buf, pack2: buf2, packc: bufc });
   } finally {
     S.busy = '';
   }
 }
 
-async function installPack(buf, buf2) {
-  const header = X.packHeader(buf);
+async function installPack(bufs) {
+  const main = bufs.pack || bufs.packc;
+  if (!main) throw new Error('Pas d’accès aux cartes avec cette licence.');
+  const header = X.packHeader(main);
   if (header.channel !== S.lic.ch) throw new Error('Ce paquet utilise une nouvelle clé : demande un nouveau lien de licence.');
-  await openPack(buf, buf2); // ne s'enregistre que s'il s'ouvre
+  await openPack(bufs); // ne s'enregistre que s'il s'ouvre
   const keep = (b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
-  await put('pack', { header, buf: keep(buf) });
-  if (buf2) await put('pack2', { header: X.packHeader(buf2), buf: keep(buf2) });
-  else await del('pack2').catch(() => {});
+  for (const name of ['pack', 'pack2', 'packc']) {
+    if (bufs[name]) await put(name, { header: X.packHeader(bufs[name]), buf: keep(bufs[name]) });
+    else await del(name).catch(() => {});
+  }
   toast(`Paquet à jour : ${plural(S.data.cards.length, 'carte')}, ${plural(S.data.fiches.length, 'fiche')}.`);
 }
 
@@ -474,7 +518,9 @@ function rebuildSrs() {
 }
 
 const fiche = (id) => S.data.fiches.find((f) => f.id === id);
-const inCursus = (x) => cfg().cursus === 'PSE2' || x.cursus === 'PSE1';
+const inCursus = (x) => R.inCursus(cfg().cursus, x.cursus);
+/** Référentiel (PDF) du cursus choisi : PSC ou PSE. */
+const curRef = () => R.refOf(cfg().cursus);
 const active = () => S.data.cards.filter((c) => !c.suspended && inCursus(c));
 const critical = (c) => { const f = fiche(c.ficheId); return !!(f && f.critical); };
 const retention = (c) => (critical(c) ? Math.max(cfg().retention, CRITICAL_RETENTION) : cfg().retention);
@@ -510,8 +556,9 @@ function show(screen) {
 function render() {
   const root = $('#root');
   const cur = $('#cursus');
-  cur.hidden = !(S.data && S.ent && (S.ent.mod.cards || S.ent.mod.feed) && S.ent.cur === 'PSE2' && ['home', 'session', 'free'].includes(S.screen) && !(S.screen === 'home' && ['sim', 'account'].includes(S.tab)));
-  for (const b of cur.querySelectorAll('button')) b.setAttribute('aria-pressed', String(S.prog && b.dataset.cursus === cfg().cursus));
+  const choices = S.data && S.ent ? cursusChoices() : [];
+  cur.hidden = !(S.data && S.ent && (S.ent.mod.cards || S.ent.mod.feed) && choices.length > 1 && ['home', 'session', 'free'].includes(S.screen) && !(S.screen === 'home' && ['sim', 'account'].includes(S.tab)));
+  for (const b of cur.querySelectorAll('button')) { b.hidden = !choices.includes(b.dataset.cursus); b.setAttribute('aria-pressed', String(S.prog && b.dataset.cursus === cfg().cursus)); }
   $('#bar-sub').textContent = S.lic ? S.lic.h : 'référentiel PSE';
   const tabs = !!(S.data && S.screen === 'home');
   $('#tabs').hidden = !tabs;
@@ -764,7 +811,7 @@ function licenceCard() {
         h('dt', {}, 'Accès'), h('dd', {}, S.ent ? [S.ent.mod.cards ? `cartes ${S.ent.cur}` : '', S.ent.mod.sim ? 'cas concrets' : '', S.ent.mod.feed ? 'fil' : ''].filter(Boolean).join(' + ') : '—'),
         h('dt', {}, 'Vérifiée'), h('dd', {}, S.ent ? fmtDateTime(S.ent.at) : '—'),
         h('dt', {}, 'Paquet'), h('dd', {}, S.pack ? `${fmtDate(Date.parse(S.pack.createdAt))} · ${S.data.cards.length} cartes` : '—'),
-        h('dt', {}, 'Référentiel'), h('dd', {}, S.data.doc ? `${S.data.doc.name} · ${S.data.doc.pages} p.` : '—')),
+        h('dt', {}, 'Référentiel'), h('dd', {}, ((S.data.refs && S.data.refs[curRef()]) || S.data).doc ? (({ doc }) => `${doc.name} · ${doc.pages} p.`)((S.data.refs && S.data.refs[curRef()]) || S.data) : '—')),
       h('div', { class: 'row' },
         h('button', { class: 'secondary', onclick: () => checkUpdate(true) }, 'Vérifier les mises à jour'),
         h('button', { class: 'link', onclick: () => { S.error = ''; show('licence'); } }, 'Changer de licence'))));
@@ -880,8 +927,18 @@ const pageCache = new Map();
 const textCache = new Map();
 const PAGE_CACHE_MAX = 16;
 
+/** PDF ouverts, un par référentiel (PSE, PSC). */
+function closePdfs() {
+  for (const d of Object.values(S.pdfs || {})) d.destroy();
+  S.pdfs = {};
+}
+/** PDF du référentiel du cursus choisi. */
 async function pdfDoc() {
-  if (S.pdf) return S.pdf;
+  const ref = curRef();
+  S.pdfs = S.pdfs || {};
+  if (S.pdfs[ref]) return S.pdfs[ref];
+  const part = S.data && S.data.refs && S.data.refs[ref];
+  if (!part || !part.pdf || !part.pdf.length) throw new Error('PDF du référentiel absent du paquet : vérifie les mises à jour.');
   if (!window.DawnPdf) {
     await new Promise((resolve, reject) => {
       const s = h('script', { src: 'pdfview.js' });
@@ -890,14 +947,14 @@ async function pdfDoc() {
       document.head.append(s);
     });
   }
-  S.pdf = await window.DawnPdf.getDocument({ data: S.pdfBytes.slice(), isEvalSupported: false, disableFontFace: true, verbosity: 0 }).promise;
-  return S.pdf;
+  S.pdfs[ref] = await window.DawnPdf.getDocument({ data: part.pdf.slice(), isEvalSupported: false, disableFontFace: true, verbosity: 0 }).promise;
+  return S.pdfs[ref];
 }
 
 /** Image de la page n à `px` pixels de large (cache réduit : mémoire du téléphone). */
 async function bitmap(n, px) {
   px = Math.min(2400, Math.max(200, Math.round(px / 100) * 100));
-  const k = `${n}|${px}`;
+  const k = `${curRef()}|${n}|${px}`;
   if (pageCache.has(k)) { const b = pageCache.get(k); pageCache.delete(k); pageCache.set(k, b); return b; }
   const page = await (await pdfDoc()).getPage(n);
   const vp1 = page.getViewport({ scale: 1 });
@@ -962,7 +1019,8 @@ function cropNode(n, r) {
 
 /** Mots de la page n (fractions de page), pour comparer une réponse tapée à ce que cachent les masques. */
 async function words(n) {
-  if (textCache.has(n)) return textCache.get(n);
+  const tk = `${curRef()}|${n}`;
+  if (textCache.has(tk)) return textCache.get(tk);
   const page = await (await pdfDoc()).getPage(n);
   const vp = page.getViewport({ scale: 1 });
   const out = [];
@@ -974,7 +1032,7 @@ async function words(n) {
     const w = it.width / vp.width;
     for (const m of it.str.matchAll(/\S+/g)) out.push({ t: m[0], x: x + w * (m.index / it.str.length), y, w: w * (m[0].length / it.str.length), h: hh * 1.1 });
   }
-  textCache.set(n, out);
+  textCache.set(tk, out);
   return out;
 }
 async function textIn(n, rects) {
